@@ -26,7 +26,7 @@ def rebuild_historical(csv_dir: Path, historico_temp: Path, historico_final: Pat
 
     dfs = []
     for csv_file in daily_csvs:
-        df = pd.read_csv(csv_file, dtype={"Código": str, "Lote": str}, low_memory=False)
+        df = pd.read_csv(csv_file, dtype={"CÓDIGO": str, "LOTE": str, "CANTIDAD CAJAS": str}, low_memory=False)
         dfs.append(df)
 
     historico_df = pd.concat(dfs, ignore_index=True)

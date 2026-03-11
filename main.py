@@ -1,3 +1,4 @@
+import sys
 from config import (
     ORIGINAL_DIR,
     ETL_DIR,
@@ -9,7 +10,7 @@ from config import (
 )
 from modules.utils import ensure_directories, build_output_names
 from modules.file_manager import get_original_excel_files, validate_original_file, get_file_date
-from modules.extract import read_excel_file, validate_expected_columns
+from modules.extract import read_excel_file, validate_expected_columns, validate_no_negatives
 from modules.transform import transform_inventory
 from modules.load import save_daily_outputs, rebuild_historical
 from modules.control import (
@@ -21,6 +22,10 @@ from modules.control import (
 
 
 def main() -> None:
+    force = "--force" in sys.argv
+    if force:
+        print("⚠ Modo --force activado: se reprocesarán TODOS los archivos.")
+
     print("=== INICIO ETL INVENTARIO FLEXY ===")
 
     ensure_directories([
@@ -43,7 +48,7 @@ def main() -> None:
     for file_path in original_files:
         filename = file_path.name
 
-        if is_already_processed(control_df, filename):
+        if not force and is_already_processed(control_df, filename):
             print(f"[SKIP] Ya procesado: {filename}")
             continue
 
@@ -74,6 +79,21 @@ def main() -> None:
             valid_cols, cols_message = validate_expected_columns(df_raw)
             if not valid_cols:
                 raise ValueError(cols_message)
+
+            # Validar que no haya valores negativos
+            valid_nums, nums_message = validate_no_negatives(df_raw, filename)
+            if not valid_nums:
+                print(nums_message)
+                control_df = add_control_record(
+                    control_df=control_df,
+                    archivo_original=filename,
+                    fecha_archivo=file_date,
+                    estado="ERROR_NEGATIVOS",
+                    observacion="Valores negativos detectados. Corregir Excel original.",
+                )
+                error_count += 1
+                print(f"[BLOQUEADO] {filename}: No se generarán salidas hasta corregir los valores negativos.")
+                continue
 
             df_clean = transform_inventory(df_raw, file_date)
 
