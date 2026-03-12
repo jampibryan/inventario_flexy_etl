@@ -4,16 +4,34 @@ BASE_DIR = Path(__file__).resolve().parent
 
 REPORTE_DIR = Path(r"D:\AG Chavin\Proyecto Flexy\Reporte")
 
+# ==============================
+# Carpetas principales
+# ==============================
 ORIGINAL_DIR = REPORTE_DIR / "ORIGINAL"
-ETL_DIR = REPORTE_DIR / "ETL"
-ETL_EXCEL_DIR = ETL_DIR / "Excel"
-ETL_CSV_DIR = ETL_DIR / "CSV"
 
-CONTROL_FILE = ETL_DIR / "control_procesados.csv"
-HISTORICO_FILE = ETL_CSV_DIR / "inventario_historico.csv"
-HISTORICO_TEMP_FILE = ETL_CSV_DIR / "inventario_historico_temp.csv"
-LOG_FILE = BASE_DIR / "logs" / "etl.log"
+PROCESADOS_DIR = REPORTE_DIR / "PROCESADOS"
+PROCESADOS_EXCEL_DIR = PROCESADOS_DIR / "Excel"
 
+DW_DIR = REPORTE_DIR / "DW"
+FACT_PARTITIONED_DIR = DW_DIR / "fact_inventario"
+
+LOGS_DIR = REPORTE_DIR / "LOGS"
+
+# ==============================
+# Archivos de control / DW
+# ==============================
+CONTROL_FILE = PROCESADOS_DIR / "control_procesados.csv"
+
+DIM_CLIENTE_FILE = DW_DIR / "dim_cliente.parquet"
+DIM_PRODUCTO_FILE = DW_DIR / "dim_producto.parquet"
+DIM_FECHA_FILE = DW_DIR / "dim_fecha.parquet"
+DIM_UBICACION_FILE = DW_DIR / "dim_ubicacion.parquet"
+
+LOG_FILE = LOGS_DIR / "etl.log"
+
+# ==============================
+# Columnas esperadas Excel Flexy
+# ==============================
 EXPECTED_COLUMNS = [
     "Fecha Actualización",
     "Empresa",

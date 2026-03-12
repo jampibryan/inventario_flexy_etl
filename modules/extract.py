@@ -21,6 +21,25 @@ def validate_expected_columns(df: pd.DataFrame) -> tuple[bool, str]:
     return True, ""
 
 
+def extract_date_from_data(df: pd.DataFrame) -> tuple[bool, str, str]:
+    """
+    Extrae la fecha desde la columna 'Fecha Actualización' del DataFrame.
+    Toma la primera fecha válida encontrada.
+    Retorna: (exito, fecha_str_yyyy_mm_dd, mensaje_error)
+    """
+    if "Fecha Actualización" not in df.columns:
+        return False, "", "No se encontró la columna 'Fecha Actualización'"
+
+    fechas = pd.to_datetime(df["Fecha Actualización"], errors="coerce").dropna()
+
+    if fechas.empty:
+        return False, "", "No se encontraron fechas válidas en 'Fecha Actualización'"
+
+    primera_fecha = fechas.iloc[0]
+    fecha_str = primera_fecha.strftime("%Y-%m-%d")
+    return True, fecha_str, ""
+
+
 def validate_no_negatives(df: pd.DataFrame, filename: str) -> tuple[bool, str]:
     """
     Valida que no haya valores negativos en columnas numéricas.
