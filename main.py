@@ -32,6 +32,7 @@ from modules.extract import (
     extract_date_from_data,
     read_excel_file,
     validate_expected_columns,
+    validate_location_structure,
     validate_no_negatives,
 )
 from modules.file_manager import get_original_excel_files
@@ -166,6 +167,21 @@ def main() -> None:
                 )
                 error_count += 1
                 logger.warning(f"[BLOQUEADO] {filename}: corrige el Excel original.")
+                continue
+
+            location_ok, location_message = validate_location_structure(df_validated, filename)
+            if location_message:
+                logger.info(location_message)
+            if not location_ok:
+                control_df = add_control_record(
+                    control_df=control_df,
+                    archivo_original=filename,
+                    fecha_archivo=file_date,
+                    estado="ERROR_UBICACION",
+                    observacion="Ubicaciones fuera de estructura CAPACITY_CONFIG. Corregir Excel original.",
+                )
+                error_count += 1
+                logger.warning(f"[BLOQUEADO] {filename}: corrige la estructura de ubicaciones del Excel.")
                 continue
 
             df_clean = transform_inventory(df_validated, file_date)

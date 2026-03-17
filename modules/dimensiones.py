@@ -7,7 +7,7 @@ from modules.ubicaciones import build_ubicacion_key
 
 
 CAPACITY_CONFIG = [
-    {"camara": "C\u00c1MARA 01", "racks": 10, "niveles": 5, "posiciones": 14, "camara_orden": 1, "es_operativa": 1, "es_estructural": 1},
+    {"camara": "C\u00c1MARA 01", "racks": 10, "niveles": 5, "posiciones": 15, "camara_orden": 1, "es_operativa": 1, "es_estructural": 1},
     {"camara": "C\u00c1MARA 02", "racks": 20, "niveles": 3, "posiciones": 4, "camara_orden": 2, "es_operativa": 1, "es_estructural": 1},
     {"camara": "C\u00c1MARA 03", "racks": 20, "niveles": 3, "posiciones": 4, "camara_orden": 3, "es_operativa": 1, "es_estructural": 1},
     {"camara": "C\u00c1MARA 04", "racks": 13, "niveles": 11, "posiciones": 3, "camara_orden": 4, "es_operativa": 0, "es_estructural": 1},
