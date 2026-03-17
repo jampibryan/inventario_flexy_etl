@@ -1,8 +1,12 @@
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
-REPORTE_DIR = Path(r"D:\AG Chavin\Proyecto Flexy\Reporte")
+DEFAULT_REPORTE_DIR = Path(
+    r"G:\Unidades compartidas\Departamento de TI\04. Proyectos\12. Dashboard Flexy\Power BI\Reporte"
+)
+REPORTE_DIR = Path(os.getenv("FLEXY_REPORTE_DIR", str(DEFAULT_REPORTE_DIR)))
 
 # ==============================
 # Carpetas principales
@@ -62,6 +66,9 @@ FINAL_COLUMNS = [
     "FECHA FABRICACIÓN",
     "FECHA CADUCIDAD",
     "PRODUCTO",
+    "VARIEDAD",
+    "CLASIFICACIÓN",
+    "CALIDAD",
+    "TIPO DE CORTE",
     "PRESENTACIÓN",
-    "TIPO PRODUCCIÓN",
 ]

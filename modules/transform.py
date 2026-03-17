@@ -1,6 +1,9 @@
-import pandas as pd
 import re
+
+import pandas as pd
+
 from config import FINAL_COLUMNS
+from modules.ubicaciones import normalize_camara
 
 
 def clasificar_almacen(almacen_original: str) -> str:
@@ -25,170 +28,149 @@ def clasificar_estado_producto(almacen_original: str) -> str:
     return "DISPONIBLE"
 
 
-def clasificar_producto(presentacion: str) -> str:
-    presentacion_upper = str(presentacion).upper()
+def clasificar_producto(texto_producto: str) -> str:
+    producto_upper = str(texto_producto).upper()
 
-    if "MANGO" in presentacion_upper:
+    if "MANGO" in producto_upper:
         return "MANGO"
-    if "PALTA" in presentacion_upper:
+    if "PALTA" in producto_upper:
         return "PALTA"
-    if "FRESA" in presentacion_upper:
+    if "FRESA" in producto_upper:
         return "FRESA"
-    if "PIÑA" in presentacion_upper:
-        return "PIÑA"
-    if "MARACUYA" in presentacion_upper:
+    if "PI\u00d1A" in producto_upper:
+        return "PI\u00d1A"
+    if "MARACUYA" in producto_upper:
         return "MARACUYA"
-    if "GRANADA" in presentacion_upper:
+    if "GRANADA" in producto_upper:
         return "GRANADA"
 
     return "OTROS"
 
 
-def clasificar_tipo_produccion(texto: str) -> str:
-    texto_upper = str(texto).upper()
-    if "ORGANICO" in texto_upper or "ORGÁNICO" in texto_upper:
-        return "ORGÁNICO"
+def clasificar_clasificacion(texto_producto: str) -> str:
+    producto_upper = str(texto_producto).upper()
+    if "ORGANICO" in producto_upper or "ORG\u00c1NICO" in producto_upper:
+        return "ORG\u00c1NICO"
     return "CONVENCIONAL"
 
 
-def limpiar_presentacion(texto: str, producto: str) -> str:
-    resultado = str(texto).strip()
-    # Quitar el nombre del producto del inicio
-    resultado = re.sub(r'(?i)^' + re.escape(producto) + r'\s*', '', resultado)
-    # Quitar ORGANICO/ORGÁNICO/CONVENCIONAL
-    resultado = re.sub(r'(?i)\bORG[AÁ]NICO\b', '', resultado)
-    resultado = re.sub(r'(?i)\bCONVENCIONAL\b', '', resultado)
-    # Limpiar espacios extra
-    resultado = re.sub(r'\s+', ' ', resultado).strip()
+def limpiar_presentacion(texto_producto: str, producto: str) -> str:
+    resultado = str(texto_producto).strip()
+    resultado = re.sub(r"(?i)^" + re.escape(producto) + r"\s*", "", resultado)
+    resultado = re.sub(r"(?i)\bORG[A\u00c1]NICO\b", "", resultado)
+    resultado = re.sub(r"(?i)\bCONVENCIONAL\b", "", resultado)
+    resultado = re.sub(r"\s+", " ", resultado).strip()
     return resultado
 
 
-def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
+def obtener_variedad(producto: str, presentacion: str) -> str | None:
+    producto_upper = str(producto).strip().upper()
+    presentacion_upper = str(presentacion).strip().upper()
 
+    if producto_upper == "MANGO":
+        if "EDWARD" in presentacion_upper:
+            return "EDWARD"
+        if "KENT" in presentacion_upper:
+            return "KENT"
+        return "OTROS"
+    if producto_upper == "FRESA":
+        return "SABRINA"
+    if producto_upper == "PALTA":
+        return "HASS"
+    if producto_upper == "GRANADA":
+        return "WONDERFUL"
+    if producto_upper == "MARACUYA":
+        return "CRIOLLA"
+    if producto_upper == "PI\u00d1A":
+        return "GOLDEN"
+
+    return None
+
+
+def obtener_calidad(producto: str) -> str | None:
+    if str(producto).strip().upper() == "MANGO":
+        return None
+    return "EST\u00c1NDAR"
+
+
+def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
     df = df.copy()
 
-    # ---------------------------
-    # 1. Tipos base
-    # ---------------------------
-    df["Fecha Actualización"] = pd.to_datetime(df["Fecha Actualización"], errors="coerce")
+    df["Fecha Actualizaci\u00f3n"] = pd.to_datetime(df["Fecha Actualizaci\u00f3n"], errors="coerce")
     df["Fecha Caducidad"] = pd.to_datetime(df["Fecha Caducidad"], dayfirst=True, errors="coerce").dt.date
-    df["Fecha Fabricación"] = pd.to_datetime(df["Fecha Fabricación"], dayfirst=True, errors="coerce").dt.date
+    df["Fecha Fabricaci\u00f3n"] = pd.to_datetime(df["Fecha Fabricaci\u00f3n"], dayfirst=True, errors="coerce").dt.date
 
-    for col in ["Empresa", "Almacén", "Ubicación", "Código", "Lote", "Producto"]:
+    for col in ["Empresa", "Almac\u00e9n", "Ubicaci\u00f3n", "C\u00f3digo", "Lote", "Producto"]:
         df[col] = df[col].astype(str).str.strip()
 
-    # ---------------------------
-    # 2. Limpiar Cantidad
-    # ---------------------------
     df["Cantidad"] = (
         df["Cantidad"]
         .astype(str)
         .str.replace(r"\s+", "", regex=True)
         .str.replace("\xa0", "", regex=False)
     )
-
     df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce")
+    df["Presentaci\u00f3n"] = pd.to_numeric(df["Presentaci\u00f3n"], errors="coerce")
 
-    # ---------------------------
-    # 3. Presentación a numérico
-    # ---------------------------
-    df["Presentación"] = pd.to_numeric(df["Presentación"], errors="coerce")
+    df["C\u00f3digo"] = df["C\u00f3digo"].replace({"nan": None, "None": None, "": None})
+    df = df[df["C\u00f3digo"].notna()].copy()
 
-    # ---------------------------
-    # 4. Filtrar Código nulo
-    # ---------------------------
-    df["Código"] = df["Código"].replace({"nan": None, "None": None, "": None})
-    df = df[df["Código"].notna()].copy()
+    df["Almac\u00e9n Original"] = df["Almac\u00e9n"].astype(str).str.strip()
 
-    # ---------------------------
-    # 5. Guardar almacén original
-    # ---------------------------
-    df["Almacén Original"] = df["Almacén"].astype(str).str.strip()
-
-    # ---------------------------
-    # 6. Dividir Ubicación
-    # ---------------------------
-    ubic_split = df["Ubicación"].astype(str).str.split(",", expand=True)
-
-    df["Cámara"] = ubic_split[0].str.strip() if 0 in ubic_split.columns else None
+    ubic_split = df["Ubicaci\u00f3n"].astype(str).str.split(",", expand=True)
+    df["C\u00e1mara"] = ubic_split[0].str.strip() if 0 in ubic_split.columns else None
     df["Rack"] = ubic_split[1].str.strip() if 1 in ubic_split.columns else None
     df["Nivel"] = ubic_split[2].str.strip() if 2 in ubic_split.columns else None
-    df["Posición"] = ubic_split[3].str.strip() if 3 in ubic_split.columns else None
+    df["Posici\u00f3n"] = ubic_split[3].str.strip() if 3 in ubic_split.columns else None
 
-    # ---------------------------
-    # 7. Convertir columnas numéricas
-    # ---------------------------
-    for col in ["Rack", "Nivel", "Posición"]:
+    for col in ["Rack", "Nivel", "Posici\u00f3n"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # ---------------------------
-    # 8. Crear Toneladas
-    # ---------------------------
-    df["Toneladas"] = (df["Presentación"] / 1000).round(2)
-
-    # ---------------------------
-    # 9. Fecha Corte
-    # ---------------------------
+    df["Toneladas"] = (df["Presentaci\u00f3n"] / 1000).round(2)
     df["Fecha Corte"] = pd.to_datetime(file_date, errors="coerce").date()
-
-    # ---------------------------
-    # 10. Empresa → Cliente
-    # ---------------------------
     df["Cliente"] = df["Empresa"]
-
-    # ---------------------------
-    # 11. Renombrar Cantidad
-    # ---------------------------
     df.rename(columns={"Cantidad": "Cantidad Cajas"}, inplace=True)
 
-    # ---------------------------
-    # 12. Normalizar almacén
-    # ---------------------------
-    df["Almacén"] = df["Almacén Original"].apply(clasificar_almacen)
+    df["Almac\u00e9n"] = df["Almac\u00e9n Original"].apply(clasificar_almacen)
+    df["Estado Producto"] = df["Almac\u00e9n Original"].apply(clasificar_estado_producto)
 
-    # ---------------------------
-    # 13. Estado Producto
-    # ---------------------------
-    df["Estado Producto"] = df["Almacén Original"].apply(clasificar_estado_producto)
-
-    # ---------------------------
-    # 14. Clasificar producto, tipo producción y renombrar
-    # ---------------------------
-    df["Producto_clasificado"] = df["Producto"].apply(clasificar_producto)
-    df["Tipo Producción"] = df["Producto"].apply(clasificar_tipo_produccion)
-    df["Presentación_limpia"] = df.apply(
-        lambda row: limpiar_presentacion(row["Producto"], row["Producto_clasificado"]), axis=1
+    df["Producto Clasificado"] = df["Producto"].apply(clasificar_producto)
+    df["Clasificaci\u00f3n"] = df["Producto"].apply(clasificar_clasificacion)
+    df["Presentaci\u00f3n Limpia"] = df.apply(
+        lambda row: limpiar_presentacion(row["Producto"], row["Producto Clasificado"]),
+        axis=1,
     )
-    df.drop(columns=["Producto", "Presentación"], inplace=True)
-    df.rename(columns={"Producto_clasificado": "Producto", "Presentación_limpia": "Presentación"}, inplace=True)
+    df["Variedad"] = df.apply(
+        lambda row: obtener_variedad(row["Producto Clasificado"], row["Presentaci\u00f3n Limpia"]),
+        axis=1,
+    )
+    df["Calidad"] = df["Producto Clasificado"].apply(obtener_calidad)
+    df["Tipo de Corte"] = None
 
-    # ---------------------------
-    # 15. Reemplazo de Cámara
-    # ---------------------------
-    df["Cámara"] = df["Cámara"].replace({
-        "01": "CÁMARA 01",
-        "02": "CÁMARA 02",
-        "03": "CÁMARA 03",
-        "RECEPCION": "RECEPCIÓN",
-        "Recepcion": "RECEPCIÓN",
-        "RECEPCIÓN": "RECEPCIÓN",
-    })
+    df.drop(columns=["Producto", "Presentaci\u00f3n"], inplace=True)
+    df.rename(
+        columns={
+            "Producto Clasificado": "Producto",
+            "Presentaci\u00f3n Limpia": "Presentaci\u00f3n",
+        },
+        inplace=True,
+    )
 
-    # ---------------------------
-    # 16. Renombrar columnas a mayúsculas y asegurar finales
-    # ---------------------------
+    df["C\u00e1mara"] = df["C\u00e1mara"].apply(normalize_camara)
+
     df.columns = df.columns.str.upper()
 
     for col in FINAL_COLUMNS:
         if col not in df.columns:
             df[col] = None
 
-    df = df[FINAL_COLUMNS].copy()
+    output_columns = FINAL_COLUMNS.copy()
+    if "_SOURCE_ROW_NUM" in df.columns:
+        output_columns.append("_SOURCE_ROW_NUM")
 
-    # ---------------------------
-    # 17. Tipos finales
-    # ---------------------------
-    for col in ["RACK", "NIVEL", "POSICIÓN", "CANTIDAD CAJAS"]:
+    df = df[output_columns].copy()
+
+    for col in ["RACK", "NIVEL", "POSICI\u00d3N", "CANTIDAD CAJAS"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
 
     df["TONELADAS"] = pd.to_numeric(df["TONELADAS"], errors="coerce").round(2)

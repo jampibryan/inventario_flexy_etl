@@ -1,52 +1,70 @@
 import hashlib
+
 import pandas as pd
 
-
-def build_ubicacion_key(row: pd.Series) -> str | None:
-    camara = str(row.get("CÁMARA", "")).strip().upper()
-    rack = row.get("RACK")
-    nivel = row.get("NIVEL")
-    posicion = row.get("POSICIÓN")
-
-    if (
-        camara.startswith("CÁMARA")
-        and pd.notna(rack)
-        and pd.notna(nivel)
-        and pd.notna(posicion)
-    ):
-        cam_num = camara.replace("CÁMARA", "").strip().zfill(2)
-        return f"CAM{cam_num}-R{int(rack):03d}-N{int(nivel):02d}-P{int(posicion):02d}"
-
-    return None
+from modules.ubicaciones import sanitize_fact_ubicaciones
 
 
-def build_fact_snapshot(df: pd.DataFrame, source_file: str) -> pd.DataFrame:
+def build_fact_snapshot(
+    df: pd.DataFrame,
+    source_file: str,
+    valid_ubicacion_keys: set[str],
+) -> tuple[pd.DataFrame, dict[str, object]]:
     fact = df.copy()
 
+    def obtener_variedad(row: pd.Series) -> str | None:
+        prod = str(row["PRODUCTO"]).strip().upper()
+        present = str(row["PRESENTACI\u00d3N"]).strip().upper()
+        if prod == "MANGO":
+            if "EDWARD" in present:
+                return "EDWARD"
+            if "KENT" in present:
+                return "KENT"
+            return "OTROS"
+        if prod == "FRESA":
+            return "SABRINA"
+        if prod == "PALTA":
+            return "HASS"
+        if prod == "GRANADA":
+            return "WONDERFUL"
+        if prod == "MARACUYA":
+            return "CRIOLLA"
+        if prod == "PI\u00d1A":
+            return "GOLDEN"
+        return None
+
+    def obtener_clasificacion(row: pd.Series) -> str | None:
+        return row["CLASIFICACI\u00d3N"]
+
+    def obtener_calidad(row: pd.Series) -> str | None:
+        prod = str(row["PRODUCTO"]).strip().upper()
+        if prod == "MANGO":
+            return None
+        return "EST\u00c1NDAR"
+
+    fact["VARIEDAD"] = fact.apply(obtener_variedad, axis=1)
+    fact["CLASIFICACI\u00d3N"] = fact.apply(obtener_clasificacion, axis=1)
+    fact["CALIDAD"] = fact.apply(obtener_calidad, axis=1)
+    fact["TIPO DE CORTE"] = pd.Series(pd.NA, index=fact.index, dtype="string")
+
     fact["FECHA CORTE"] = pd.to_datetime(fact["FECHA CORTE"], errors="coerce")
-    fact["fecha_key"] = fact["FECHA CORTE"].dt.strftime("%Y%m%d").astype("string")
+    fact["fecha_key"] = fact["FECHA CORTE"].dt.strftime("%Y%m%d").astype(int)
 
     fact["cliente_key"] = fact["CLIENTE"].astype(str).str.strip().str.upper()
-    fact["producto_key"] = fact["CÓDIGO"].astype(str).str.strip().str.upper()
-    fact["ubicacion_key"] = fact.apply(build_ubicacion_key, axis=1)
+    fact["producto_key"] = fact["C\u00d3DIGO"].astype(str).str.strip().str.upper()
 
-    fact["almacen_grupo"] = fact["ALMACÉN"].astype(str).str.upper().apply(
-        lambda x: "CHAVIN" if x == "CHAVIN" else "EXTERNOS"
-    )
-
-    fact["tipo_ubicacion"] = fact.apply(
-        lambda r: (
-            "POSICION" if pd.notna(r["ubicacion_key"])
-            else "RECEPCION" if str(r["CÁMARA"]).strip().upper() == "RECEPCIÓN"
-            else "EXTERNO" if str(r["ALMACÉN"]).strip().upper() != "CHAVIN"
-            else "SIN_UBICACION"
-        ),
-        axis=1,
+    fact["almacen_grupo"] = fact["ALMAC\u00c9N"].astype(str).str.upper()
+    fact["tipo_almacen"] = fact["almacen_grupo"].apply(
+        lambda x: "INTERNO" if x == "CHAVIN" else "EXTERNO" 
     )
 
     fact["pallets"] = 1
     fact["source_file"] = source_file
-    fact["source_row_num"] = range(2, len(fact) + 2)
+    if "_SOURCE_ROW_NUM" in fact.columns:
+        fact["source_row_num"] = pd.to_numeric(fact["_SOURCE_ROW_NUM"], errors="coerce").astype("Int64")
+        fact.drop(columns=["_SOURCE_ROW_NUM"], inplace=True)
+    else:
+        fact["source_row_num"] = range(2, len(fact) + 2)
 
     fact["snapshot_row_id"] = fact.apply(
         lambda r: hashlib.sha1(
@@ -55,4 +73,7 @@ def build_fact_snapshot(df: pd.DataFrame, source_file: str) -> pd.DataFrame:
         axis=1,
     )
 
-    return fact
+    fact, ubicacion_audit = sanitize_fact_ubicaciones(fact, valid_ubicacion_keys)
+    fact["FECHA CORTE"] = fact["FECHA CORTE"].dt.date
+
+    return fact, ubicacion_audit
