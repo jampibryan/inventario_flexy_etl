@@ -1,0 +1,10 @@
+activo,rule_name,codigo,producto,presentacion_contains,max_boxes,comentario
+1,MANGO_DEFAULT_120,,MANGO,,120,Base conservadora. Cambia a 90 solo si el SKU o presentacion esta confirmado.
+1,PALTA_DEFAULT_120,,PALTA,,120,Base general.
+1,FRESA_DEFAULT_120,,FRESA,,120,Base general.
+1,GRANADA_DEFAULT_120,,GRANADA,,120,Base general.
+1,MARACUYA_DEFAULT_120,,MARACUYA,,120,Base general.
+1,PINA_DEFAULT_120,,PIÑA,,120,Base general.
+1,OTROS_DEFAULT_120,,OTROS,,120,Base general.
+0,EJEMPLO_SKU_90,SKU-0001,,,90,Activa esta fila y reemplaza el SKU real cuando tengas catalogo validado.
+0,EJEMPLO_MANGO_EDWARD_90,,MANGO,EDWARD,90,Activa esta fila si una presentacion especifica de mango debe limitarse a 90 cajas.

@@ -1,0 +1,4 @@
+activo,rule_name,almacen,camaras,codigos,productos,max_logical_pallets,max_total_boxes,max_boxes_per_pallet,min_boxes_per_pallet,require_distinct_products,comentario
+1,SMALL_PALLETS_GENERIC,CHAVIN,,,,2,120,60,1,1,Regla base para permitir dos pallets pequenos distintos dentro de una ubicacion.
+0,EJEMPLO_CAMARA_01,CHAVIN,CÁMARA 01,,,2,120,50,1,1,Ejemplo de regla restringida a una camara especifica.
+0,EJEMPLO_PRODUCTOS,CHAVIN,,,PALTA|FRESA,2,120,60,1,1,Ejemplo de regla valida solo para ciertos productos.

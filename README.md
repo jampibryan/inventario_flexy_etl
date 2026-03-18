@@ -12,7 +12,9 @@ El proyecto transforma snapshots diarios de inventario en un modelo tipo estrell
 - `dim_fecha.parquet`
 - `dim_ubicacion.parquet`
 
-Cada fila del Excel representa 1 pallet.
+Cada fila del Excel representa 1 registro operativo.
+La tabla final `fact_inventario` ahora queda a nivel de `pallet_logico`,
+resuelto por ubicacion fisica.
 
 ## Beneficios de la arquitectura
 
@@ -95,6 +97,12 @@ Reprocesar archivos ya registrados:
 .\venv\Scripts\python.exe main.py --force
 ```
 
+Pruebas automatizadas:
+
+```powershell
+.\venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
 Flujo diario:
 
 1. Descargar el Excel desde Flexy.
@@ -111,12 +119,14 @@ Flujo diario:
 4. Validar que no existan valores negativos.
 5. Transformar el layout del Excel.
 6. Guardar Excel limpio para revision humana.
-7. Construir `fact_inventario`.
-8. Validar integridad de ubicaciones antes de cargar.
-9. Escribir la particion diaria parquet.
-10. Sanear particiones historicas si tienen ubicaciones invalidas.
-11. Regenerar dimensiones.
-12. Registrar el resultado en `control_procesados.csv`.
+7. Resolver ocupacion por ubicacion fisica.
+8. Construir `fact_inventario` a nivel de pallet logico.
+9. Guardar auditoria diaria de consolidaciones, descartes y errores.
+10. Validar integridad de ubicaciones antes de cargar.
+11. Escribir la particion diaria parquet.
+12. Sanear particiones historicas si tienen ubicaciones invalidas.
+13. Regenerar dimensiones.
+14. Registrar el resultado en `control_procesados.csv`.
 
 ## Transformaciones principales
 
@@ -134,7 +144,7 @@ Transformaciones relevantes:
 - `Almacen` se clasifica en `CHAVIN`, `ACUAPESCA`, `EMERGENT COLD` u original.
 - `Estado Producto` se deriva desde el almacen original.
 - `Producto`, `Clasificacion`, `Variedad` y `Calidad` se derivan desde el texto del producto.
-- `Toneladas` = `Presentacion / 1000`.
+- `Toneladas` = `Cantidad * Presentacion / 1000`.
 - Se eliminan filas con `Codigo` nulo.
 - El layout final queda en mayusculas.
 
@@ -149,7 +159,8 @@ TIPO DE CORTE, PRESENTACION
 
 ## Fact table: `fact_inventario/`
 
-Cada particion representa un snapshot completo del inventario para una fecha.
+Cada particion representa un snapshot limpio del inventario para una fecha.
+El grano ya no es la fila del Excel sino el `pallet_logico` resuelto.
 
 Campos tecnicos principales:
 
@@ -162,9 +173,45 @@ Campos tecnicos principales:
 - `tipo_almacen`
 - `tipo_ubicacion`
 - `pallets`
+- `pallet_logico_id`
+- `tipo_registro_resuelto`
+- `ubicacion_ocupada_flag`
+- `conflicto_flag`
+- `sobrecapacidad_flag`
+- `registro_vigente_flag`
+- `pallet_consolidado_flag`
 - `source_file`
 - `source_row_num`
+- `source_row_nums`
 - `snapshot_row_id`
+
+## Auditoria de ocupacion
+
+El ETL ahora genera tambien:
+
+- `DW/fact_inventario_auditoria/fecha_corte=YYYY-MM-DD/data.parquet`
+- `PROCESADOS/Auditoria/auditoria_ocupacion_DD-MM-YYYY.xlsx`
+
+La auditoria conserva la trazabilidad por fila fuente y clasifica:
+
+- consolidados
+- multipallet valido
+- conflicto resuelto por registro mas reciente
+- descartado por conflicto
+- error de sobrecapacidad
+
+## Reglas configurables
+
+La resolucion de ocupacion ahora depende de tres configuraciones en `config.py`:
+
+- `PALLET_IDENTITY_FIELDS`: define con que campos se consolida un pallet logico.
+- `BOX_CAPACITY_RULES`: define capacidad maxima de cajas por producto o SKU.
+- `MULTIPALLET_COMPATIBILITY_RULES`: define cuando dos pallets pequenos pueden coexistir validamente en una sola ubicacion.
+
+Si existen estos archivos, el ETL los lee automaticamente y reemplaza los defaults de `config.py`:
+
+- `catalogos/box_capacity_rules.csv`
+- `catalogos/multipallet_compatibility_rules.csv`
 
 ## Dimension de ubicacion
 
@@ -253,7 +300,7 @@ Mensajes esperados en log:
 | Archivo | Contenido |
 |---|---|
 | `dim_cliente.parquet` | Clientes unicos |
-| `dim_producto.parquet` | Codigo, producto, variedad, clasificacion, calidad, tipo_corte, presentacion |
+| `dim_producto.parquet` | Codigo, producto, variedad, clasificacion, calidad, tipo_corte, presentacion, max_cajas_configuradas, regla_capacidad |
 | `dim_fecha.parquet` | Fecha, anio, mes, trimestre, semana y dia |
 | `dim_ubicacion.parquet` | Posiciones estructurales configuradas |
 
@@ -272,8 +319,10 @@ DW/
 
 Analisis habilitados:
 
-- pallets por camara
-- ocupacion estructural
+- pallets logicos por camara
+- ubicaciones ocupadas usando `sum(ubicacion_ocupada_flag)`
+- pallets consolidados usando `sum(pallet_consolidado_flag)`
+- ubicaciones con conflicto usando `distinctcount(ubicacion_key)` filtrando `conflicto_flag = 1`
 - capacidad vs ocupacion
 - historico por fecha de corte
 - inventario por producto, cliente o almacen

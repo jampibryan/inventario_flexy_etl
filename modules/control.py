@@ -35,6 +35,24 @@ def save_control_file(control_df: pd.DataFrame, control_path: Path) -> None:
     control_df.to_csv(control_path, index=False, encoding="utf-8-sig")
 
 
+def remove_control_records(
+    control_df: pd.DataFrame,
+    archivo_original: str,
+    fecha_archivo: str = "",
+) -> pd.DataFrame:
+    """
+    Elimina registros previos del mismo archivo y fecha para permitir un reproceso limpio.
+    """
+    if control_df.empty:
+        return control_df
+
+    mask = control_df["archivo_original"] == archivo_original
+    if fecha_archivo:
+        mask &= control_df["fecha_archivo"] == fecha_archivo
+
+    return control_df.loc[~mask].reset_index(drop=True)
+
+
 def is_already_processed(control_df: pd.DataFrame, filename: str) -> bool:
     """
     Revisa si un archivo ya fue procesado correctamente.
@@ -61,6 +79,8 @@ def add_control_record(
     """
     Agrega un registro al archivo de control.
     """
+    control_df = remove_control_records(control_df, archivo_original, fecha_archivo)
+
     new_row = {
         "archivo_original": archivo_original,
         "fecha_archivo": fecha_archivo,

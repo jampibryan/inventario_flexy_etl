@@ -4,6 +4,8 @@ from typing import Any
 
 import pandas as pd
 
+from config import CONTROLLED_INTERNAL_WAREHOUSES
+
 
 CAMARA_PREFIX = "C\u00c1MARA"
 RECEPCION_LABEL = "RECEPCI\u00d3N"
@@ -28,6 +30,9 @@ def normalize_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value)).strip().upper()
 
 
+CONTROLLED_INTERNAL_WAREHOUSE_SET = {normalize_text(value) for value in CONTROLLED_INTERNAL_WAREHOUSES}
+
+
 def strip_accents(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     return "".join(char for char in normalized if not unicodedata.combining(char))
@@ -37,7 +42,7 @@ def normalize_camara(value: Any) -> str:
     camara = normalize_text(value)
     camara_ascii = strip_accents(camara)
 
-    if camara_ascii == "RECEPCION":
+    if camara_ascii == "RECEPCION" or re.fullmatch(r"RECEPCI.N", camara_ascii):
         return RECEPCION_LABEL
 
     if re.fullmatch(r"\d{1,2}", camara_ascii):
@@ -46,6 +51,10 @@ def normalize_camara(value: Any) -> str:
     match = re.fullmatch(r"CAMARA\s*(\d{1,2})", camara_ascii)
     if match:
         return f"{CAMARA_PREFIX} {int(match.group(1)):02d}"
+
+    match_flexible = re.fullmatch(r"C.MARA\s*(\d{1,2})", camara_ascii)
+    if match_flexible:
+        return f"{CAMARA_PREFIX} {int(match_flexible.group(1)):02d}"
 
     return camara
 
@@ -87,6 +96,10 @@ def build_ubicacion_key(
     )
 
 
+def resolve_almacen_control_reference(row: pd.Series) -> Any:
+    return row.get("ALMACÉN ORIGINAL", row.get("ALMACÉN"))
+
+
 def resolve_ubicacion_inventario(
     almacen: Any,
     camara: Any,
@@ -96,7 +109,7 @@ def resolve_ubicacion_inventario(
     almacen_norm = normalize_text(almacen)
     camara_norm = normalize_camara(camara)
 
-    if almacen_norm != "CHAVIN":
+    if almacen_norm not in CONTROLLED_INTERNAL_WAREHOUSE_SET:
         return EXTERNO_LABEL
     if camara_norm == RECEPCION_LABEL:
         return RECEPCION_LABEL
@@ -114,7 +127,7 @@ def resolve_tipo_ubicacion(
     almacen_norm = normalize_text(almacen)
     camara_norm = normalize_camara(camara)
 
-    if almacen_norm != "CHAVIN":
+    if almacen_norm not in CONTROLLED_INTERNAL_WAREHOUSE_SET:
         return EXTERNO_LABEL
     if camara_norm == RECEPCION_LABEL:
         return RECEPCION_LABEL
@@ -143,7 +156,7 @@ def sanitize_fact_ubicaciones(
     fact["ubicacion_key"] = ubicacion_key_candidata.where(es_match_dim, pd.NA).astype("string")
     fact["ubicacion_inventario"] = fact.apply(
         lambda row: resolve_ubicacion_inventario(
-            row.get("ALMAC\u00c9N"),
+            resolve_almacen_control_reference(row),
             row.get("C\u00c1MARA"),
             row.get("ubicacion_key"),
             valid_ubicacion_keys,
@@ -152,7 +165,7 @@ def sanitize_fact_ubicaciones(
     )
     fact["tipo_ubicacion"] = fact.apply(
         lambda row: resolve_tipo_ubicacion(
-            row.get("ALMAC\u00c9N"),
+            resolve_almacen_control_reference(row),
             row.get("C\u00c1MARA"),
             row.get("ubicacion_key"),
             valid_ubicacion_keys,
@@ -160,7 +173,11 @@ def sanitize_fact_ubicaciones(
         axis=1,
     )
 
-    invalid_mask = ubicacion_key_candidata.notna() & ~es_match_dim
+    internal_mask = fact.apply(
+        lambda row: normalize_text(resolve_almacen_control_reference(row)) in CONTROLLED_INTERNAL_WAREHOUSE_SET,
+        axis=1,
+    )
+    invalid_mask = internal_mask & ubicacion_key_candidata.notna() & ~es_match_dim
     invalid_rows = fact_df.loc[invalid_mask].copy()
     invalid_rows["ubicacion_key_candidata"] = ubicacion_key_candidata[invalid_mask]
     invalid_rows["camara_normalizada"] = invalid_rows["C\u00c1MARA"].apply(normalize_camara)

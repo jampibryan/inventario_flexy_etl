@@ -1,17 +1,41 @@
 from itertools import product
 from pathlib import Path
+import re
 
 import pandas as pd
 
-from modules.ubicaciones import build_ubicacion_key
+from modules.resolucion_ocupacion import resolve_box_capacity_rule
+from modules.ubicaciones import build_ubicacion_key, strip_accents
 
 
 CAPACITY_CONFIG = [
     {"camara": "C\u00c1MARA 01", "racks": 10, "niveles": 5, "posiciones": 15, "camara_orden": 1, "es_operativa": 1, "es_estructural": 1},
     {"camara": "C\u00c1MARA 02", "racks": 20, "niveles": 3, "posiciones": 4, "camara_orden": 2, "es_operativa": 1, "es_estructural": 1},
     {"camara": "C\u00c1MARA 03", "racks": 20, "niveles": 3, "posiciones": 4, "camara_orden": 3, "es_operativa": 1, "es_estructural": 1},
-    {"camara": "C\u00c1MARA 04", "racks": 13, "niveles": 11, "posiciones": 3, "camara_orden": 4, "es_operativa": 0, "es_estructural": 1},
+    {"camara": "C\u00c1MARA 04", "racks": 13, "niveles": 11, "posiciones": 3, "camara_orden": 4, "es_operativa": 1, "es_estructural": 1},
 ]
+
+
+def _canonicalize_product_fact_columns(fact_df: pd.DataFrame) -> pd.DataFrame:
+    rename_map: dict[str, str] = {}
+    canonical_map = {
+        "CODIGO": "CÓDIGO",
+        "CDIGO": "CÓDIGO",
+        "PRESENTACION": "PRESENTACIÓN",
+        "PRESENTACIN": "PRESENTACIÓN",
+        "CLASIFICACION": "CLASIFICACIÓN",
+        "CLASIFICACIN": "CLASIFICACIÓN",
+    }
+
+    for column in fact_df.columns:
+        normalized = strip_accents(str(column)).upper()
+        normalized = re.sub(r"[^A-Z0-9 ]+", "", normalized)
+        normalized = " ".join(normalized.split())
+        rename_target = canonical_map.get(normalized)
+        if rename_target:
+            rename_map[column] = rename_target
+
+    return fact_df.rename(columns=rename_map)
 
 
 def build_fact_from_partitions(partitioned_dir: Path) -> pd.DataFrame:
@@ -39,9 +63,21 @@ def build_dim_cliente(fact_df: pd.DataFrame) -> pd.DataFrame:
 def build_dim_producto(fact_df: pd.DataFrame) -> pd.DataFrame:
     if fact_df.empty:
         return pd.DataFrame(
-            columns=["producto_key", "codigo", "producto", "variedad", "clasificacion", "calidad", "tipo_corte", "presentacion"]
+            columns=[
+                "producto_key",
+                "codigo",
+                "producto",
+                "variedad",
+                "clasificacion",
+                "calidad",
+                "tipo_corte",
+                "presentacion",
+                "max_cajas_configuradas",
+                "regla_capacidad",
+            ]
         )
 
+    fact_df = _canonicalize_product_fact_columns(fact_df.copy())
     df = fact_df[["C\u00d3DIGO", "PRODUCTO", "PRESENTACI\u00d3N", "CLASIFICACI\u00d3N"]].drop_duplicates().copy()
     df["producto"] = df["PRODUCTO"]
 
@@ -78,12 +114,26 @@ def build_dim_producto(fact_df: pd.DataFrame) -> pd.DataFrame:
     df["calidad"] = df.apply(obtener_calidad, axis=1)
     df["tipo_corte"] = pd.Series(pd.NA, index=df.index, dtype="string")
     df["presentacion"] = df["PRESENTACI\u00d3N"]
+    capacity_rules = df.apply(resolve_box_capacity_rule, axis=1)
+    df["max_cajas_configuradas"] = capacity_rules.apply(lambda value: value[0])
+    df["regla_capacidad"] = capacity_rules.apply(lambda value: value[1])
 
     df["producto_key"] = df["C\u00d3DIGO"].astype(str).str.strip().str.upper()
     df["codigo"] = df["C\u00d3DIGO"].astype(str).str.strip().str.upper()
 
     df_final = df[
-        ["producto_key", "codigo", "producto", "variedad", "clasificacion", "calidad", "tipo_corte", "presentacion"]
+        [
+            "producto_key",
+            "codigo",
+            "producto",
+            "variedad",
+            "clasificacion",
+            "calidad",
+            "tipo_corte",
+            "presentacion",
+            "max_cajas_configuradas",
+            "regla_capacidad",
+        ]
     ].copy()
     df_final["tipo_corte"] = df_final["tipo_corte"].astype("string")
     return df_final.reset_index(drop=True)
@@ -141,3 +191,17 @@ def build_dim_ubicacion() -> pd.DataFrame:
             })
 
     return pd.DataFrame(rows)
+
+
+def summarize_dim_ubicacion_operativa(dim_ubicacion: pd.DataFrame) -> pd.DataFrame:
+    if dim_ubicacion.empty:
+        return pd.DataFrame(columns=["camara", "es_operativa", "ubicaciones"])
+
+    summary = (
+        dim_ubicacion.groupby(["camara", "es_operativa"], dropna=False)
+        .size()
+        .reset_index(name="ubicaciones")
+        .sort_values(["camara", "es_operativa"])
+        .reset_index(drop=True)
+    )
+    return summary

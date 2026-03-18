@@ -93,6 +93,45 @@ def obtener_calidad(producto: str) -> str | None:
     return "EST\u00c1NDAR"
 
 
+def extraer_kg_por_caja(texto_producto: str) -> float | None:
+    texto = str(texto_producto).upper().replace(",", ".")
+    patterns = [
+        r"\bX\s*(\d+(?:\.\d+)?)\s*KG\b",
+        r"\bCJ\s*X\s*(\d+(?:\.\d+)?)\s*KG\b",
+        r"\bCAJA\s*X\s*(\d+(?:\.\d+)?)\s*KG\b",
+        r"\bCAJA\s*(\d+(?:\.\d+)?)\s*KG\b",
+        r"\bCJ\s*(\d+(?:\.\d+)?)\s*KG\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, texto)
+        if match:
+            return float(match.group(1))
+
+    return None
+
+
+def resolver_presentacion_kg(
+    texto_producto: str,
+    presentacion_raw: float | int | None,
+    cantidad_cajas: float | int | None,
+) -> float | None:
+    kg_por_caja = extraer_kg_por_caja(texto_producto)
+    if kg_por_caja is not None:
+        return kg_por_caja
+
+    if pd.isna(presentacion_raw):
+        return None
+
+    presentacion_value = float(presentacion_raw)
+    cantidad_value = pd.to_numeric(cantidad_cajas, errors="coerce")
+
+    if pd.notna(cantidad_value) and float(cantidad_value) > 0 and presentacion_value > 100:
+        return round(presentacion_value / float(cantidad_value), 4)
+
+    return presentacion_value
+
+
 def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
     df = df.copy()
 
@@ -116,6 +155,7 @@ def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
     df = df[df["C\u00f3digo"].notna()].copy()
 
     df["Almac\u00e9n Original"] = df["Almac\u00e9n"].astype(str).str.strip()
+    df["Ubicaci\u00f3n Original"] = df["Ubicaci\u00f3n"].astype(str).str.strip()
 
     ubic_split = df["Ubicaci\u00f3n"].astype(str).str.split(",", expand=True)
     df["C\u00e1mara"] = ubic_split[0].str.strip() if 0 in ubic_split.columns else None
@@ -126,7 +166,15 @@ def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
     for col in ["Rack", "Nivel", "Posici\u00f3n"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["Toneladas"] = (df["Presentaci\u00f3n"] / 1000).round(2)
+    df["Presentacion Kg"] = df.apply(
+        lambda row: resolver_presentacion_kg(
+            row["Producto"],
+            row["Presentaci\u00f3n"],
+            row["Cantidad"],
+        ),
+        axis=1,
+    )
+    df["Toneladas"] = ((df["Cantidad"] * df["Presentacion Kg"]) / 1000).round(2)
     df["Fecha Corte"] = pd.to_datetime(file_date, errors="coerce").date()
     df["Cliente"] = df["Empresa"]
     df.rename(columns={"Cantidad": "Cantidad Cajas"}, inplace=True)
@@ -147,7 +195,7 @@ def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
     df["Calidad"] = df["Producto Clasificado"].apply(obtener_calidad)
     df["Tipo de Corte"] = None
 
-    df.drop(columns=["Producto", "Presentaci\u00f3n"], inplace=True)
+    df.drop(columns=["Producto", "Presentaci\u00f3n", "Presentacion Kg"], inplace=True)
     df.rename(
         columns={
             "Producto Clasificado": "Producto",
@@ -167,6 +215,9 @@ def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
     output_columns = FINAL_COLUMNS.copy()
     if "_SOURCE_ROW_NUM" in df.columns:
         output_columns.append("_SOURCE_ROW_NUM")
+    for extra_col in ["ALMAC\u00c9N ORIGINAL", "UBICACI\u00d3N ORIGINAL"]:
+        if extra_col in df.columns:
+            output_columns.append(extra_col)
 
     df = df[output_columns].copy()
 

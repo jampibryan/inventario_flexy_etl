@@ -1,11 +1,16 @@
 from pathlib import Path
+import re
 import unicodedata
 
 import pandas as pd
 
-from config import EXPECTED_COLUMNS
+from config import CONTROLLED_INTERNAL_WAREHOUSES, EXPECTED_COLUMNS
 from modules.dimensiones import CAPACITY_CONFIG
-from modules.ubicaciones import RECEPCION_LABEL, normalize_camara
+from modules.ubicaciones import (
+    CONTROLLED_INTERNAL_WAREHOUSE_SET,
+    RECEPCION_LABEL,
+    normalize_camara,
+)
 
 
 def _normalize_text(value: str) -> str:
@@ -16,6 +21,49 @@ def _normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [_normalize_text(col) for col in df.columns]
     return df
+
+
+def _canonicalize_extract_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = _normalize_dataframe_columns(df)
+    canonical_map = {
+        "FECHA ACTUALIZACION": "Fecha Actualización",
+        "ALMACEN": "Almacén",
+        "UBICACION": "Ubicación",
+        "CODIGO": "Código",
+        "PRESENTACION": "Presentación",
+        "FECHA FABRICACION": "Fecha Fabricación",
+    }
+    rename_map: dict[str, str] = {}
+
+    for column in df.columns:
+        normalized = unicodedata.normalize("NFKD", str(column))
+        normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+        normalized = normalized.upper()
+        normalized = re.sub(r"[^A-Z0-9 ]+", "", normalized)
+        normalized = " ".join(normalized.split())
+        rename_target = canonical_map.get(normalized)
+        if rename_target:
+            rename_map[column] = rename_target
+
+    return df.rename(columns=rename_map)
+
+
+def _find_extract_column(columns: pd.Index, *tokens: str) -> str | None:
+    normalized_columns: dict[str, str] = {}
+
+    for column in columns:
+        normalized = unicodedata.normalize("NFKD", str(column))
+        normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+        normalized = normalized.upper()
+        normalized = re.sub(r"[^A-Z0-9 ]+", "", normalized)
+        normalized = " ".join(normalized.split())
+        normalized_columns[normalized] = str(column)
+
+    for normalized, original in normalized_columns.items():
+        if all(token.upper() in normalized for token in tokens):
+            return original
+
+    return None
 
 
 def _build_capacity_lookup() -> dict[str, dict[str, int | str]]:
@@ -254,7 +302,7 @@ def _prepare_location_structure_frame(df: pd.DataFrame) -> pd.DataFrame:
     df_check["posicion_num"] = pd.to_numeric(df_check["posicion_raw"], errors="coerce")
     df_check["ubicacion_componentes"] = ubic_split.shape[1]
     df_check["almacen_upper"] = df_check["Almac\u00e9n"].fillna("").astype(str).str.upper()
-    df_check["es_chavin"] = df_check["almacen_upper"].str.contains("CHAVIN", na=False)
+    df_check["es_chavin"] = df_check["Almacén"].apply(_is_controlled_internal_warehouse)
     df_check["componentes_no_vacios"] = df_check[["camara_raw", "rack_raw", "nivel_raw", "posicion_raw"]].apply(
         lambda row: sum(bool(str(value).strip()) for value in row),
         axis=1,
@@ -270,6 +318,209 @@ def _prepare_location_structure_frame(df: pd.DataFrame) -> pd.DataFrame:
         df_check["componentes_extra"] = [[] for _ in range(len(df_check))]
 
     return df_check
+
+
+def _normalize_operational_location(value: object) -> str:
+    return ",".join(part.strip() for part in str(value).strip().upper().split(","))
+
+
+def _is_controlled_internal_warehouse(value: object) -> bool:
+    return " ".join(str(value).strip().upper().split()) in CONTROLLED_INTERNAL_WAREHOUSE_SET
+
+
+def _build_operational_resolution_frame(df: pd.DataFrame) -> pd.DataFrame:
+    df_check = _canonicalize_extract_columns(df).copy()
+
+    empresa_col = _find_extract_column(df_check.columns, "EMPRESA")
+    almacen_col = _find_extract_column(df_check.columns, "ALMAC")
+    ubicacion_col = _find_extract_column(df_check.columns, "UBIC")
+    codigo_col = _find_extract_column(df_check.columns, "DIGO")
+    producto_col = _find_extract_column(df_check.columns, "PRODUCTO")
+    presentacion_col = _find_extract_column(df_check.columns, "PRESENT")
+    fecha_fabricacion_col = _find_extract_column(df_check.columns, "FECHA", "FABRIC")
+    cantidad_col = _find_extract_column(df_check.columns, "CANT")
+
+    required_columns = [
+        empresa_col,
+        almacen_col,
+        ubicacion_col,
+        codigo_col,
+        producto_col,
+        presentacion_col,
+        fecha_fabricacion_col,
+        cantidad_col,
+    ]
+    if any(column is None for column in required_columns):
+        return pd.DataFrame()
+
+    for col in [empresa_col, almacen_col, ubicacion_col, codigo_col, producto_col]:
+        df_check[col] = df_check[col].astype(str).str.strip()
+
+    df_check[presentacion_col] = df_check[presentacion_col].astype(str).str.strip()
+
+    if "_source_row_num" not in df_check.columns:
+        df_check["_source_row_num"] = df_check.index + 2
+
+    df_check = df_check[df_check[almacen_col].apply(_is_controlled_internal_warehouse)].copy()
+    if df_check.empty:
+        return pd.DataFrame()
+
+    df_check["ubicacion_operativa"] = df_check[ubicacion_col].apply(_normalize_operational_location)
+    df_check["codigo_norm"] = df_check[codigo_col].astype(str).str.strip().str.upper()
+    df_check["producto_norm"] = df_check[producto_col].astype(str).str.strip().str.upper()
+    df_check["presentacion_norm"] = df_check[presentacion_col].astype(str).str.strip().str.upper()
+    df_check["fecha_fabricacion_dt"] = pd.to_datetime(
+        df_check[fecha_fabricacion_col],
+        dayfirst=True,
+        errors="coerce",
+    )
+    df_check["identity_key_extract"] = (
+        df_check[empresa_col].astype(str).str.strip().str.upper()
+        + "|"
+        + df_check["codigo_norm"]
+        + "|"
+        + df_check["producto_norm"]
+        + "|"
+        + df_check["presentacion_norm"]
+        + "|"
+        + df_check[almacen_col].astype(str).str.strip().str.upper()
+    )
+    df_check["codigo_display"] = df_check[codigo_col]
+    df_check["producto_display"] = df_check[producto_col]
+    df_check["cantidad_display"] = pd.to_numeric(df_check[cantidad_col], errors="coerce")
+    return df_check
+
+
+def summarize_operational_resolution_candidates(df: pd.DataFrame, filename: str) -> str:
+    """
+    Resume patrones detectados en el Excel que luego seran resueltos por la capa
+    de ocupacion por ubicacion.
+    """
+    if df.empty:
+        return ""
+
+    df_check = _build_operational_resolution_frame(df)
+    if df_check.empty:
+        return ""
+
+    consolidation_lines: list[str] = []
+    conflict_lines: list[str] = []
+    multipallet_lines: list[str] = []
+    consolidation_count = 0
+    conflict_count = 0
+    multipallet_count = 0
+
+    grouped = df_check.groupby("ubicacion_operativa", dropna=False)
+
+    for ubicacion, group in grouped:
+        if not ubicacion:
+            continue
+
+        same_identity_groups = [
+            candidate_group
+            for _, candidate_group in group.groupby("identity_key_extract", dropna=False)
+            if len(candidate_group) > 1
+        ]
+
+        if same_identity_groups:
+            consolidation_count += len(same_identity_groups)
+            for candidate_group in same_identity_groups[:3]:
+                sample = candidate_group.iloc[0]
+                total_cajas = pd.to_numeric(candidate_group["cantidad_display"], errors="coerce").fillna(0).sum()
+                filas = ",".join(str(int(value)) for value in candidate_group["_source_row_num"].tolist())
+                consolidation_lines.append(
+                    f"     -> Filas {filas} | Ubicacion {ubicacion} | Codigo {sample['codigo_display']} | "
+                    f"Se detecto el mismo pallet en varias filas. "
+                    f"Se consolidara en 1 pallet logico con {int(total_cajas)} cajas."
+                )
+
+        distinct_codes = group["codigo_norm"].nunique(dropna=True)
+        if distinct_codes > 1:
+            sorted_group = group.sort_values(
+                by=["fecha_fabricacion_dt", "_source_row_num"],
+                ascending=[False, False],
+                na_position="last",
+            )
+            latest = sorted_group.iloc[0]
+            other_codes = ", ".join(sorted(group["codigo_norm"].dropna().unique().tolist()))
+            cajas_por_codigo = (
+                group.groupby("codigo_norm")["cantidad_display"]
+                .sum(min_count=1)
+                .fillna(0)
+                .astype(float)
+                .to_dict()
+            )
+            small_pallets = all(value <= 60 for value in cajas_por_codigo.values()) and len(cajas_por_codigo) <= 2
+
+            if small_pallets:
+                multipallet_count += 1
+                filas = ",".join(
+                    str(int(value))
+                    for value in (
+                        pd.to_numeric(group["_source_row_num"], errors="coerce")
+                        .dropna()
+                        .astype(int)
+                        .tolist()
+                    )
+                )
+                multipallet_lines.append(
+                    f"     -> Filas {filas} | Ubicacion {ubicacion} | Codigos {other_codes} | "
+                    "Se detecto multipallet pequeno. "
+                    "Se conservaran 2 pallets logicos en 1 sola ubicacion si la regla de compatibilidad aplica."
+                )
+            else:
+                conflict_count += 1
+                fecha_latest = latest["fecha_fabricacion_dt"]
+                fecha_latest_str = fecha_latest.strftime("%Y-%m-%d") if pd.notna(fecha_latest) else "[SIN FECHA]"
+                filas = ",".join(
+                    str(int(value))
+                    for value in (
+                        pd.to_numeric(group["_source_row_num"], errors="coerce")
+                        .dropna()
+                        .astype(int)
+                        .tolist()
+                    )
+                )
+                conflict_lines.append(
+                    f"     -> Filas {filas} | Ubicacion {ubicacion} | Codigos {other_codes} | "
+                    f"Incongruencia detectada. Inventario limpio: solo queda {latest['codigo_display']} "
+                    f"(Fecha Fabricacion {fecha_latest_str}). Los demas registros de esa ubicacion "
+                    "se eliminan del inventario limpio y quedan solo en auditoria."
+                )
+
+    if consolidation_count == 0 and conflict_count == 0 and multipallet_count == 0:
+        return ""
+
+    sep = "=" * 90
+    sections = [
+        f"\n{sep}",
+        f"  ANALISIS OPERATIVO PREVIO: {filename}",
+        "  Incongruencias operativas detectadas antes de resolver por ubicacion:",
+        f"  Alcance: solo almacenes internos controlados ({', '.join(CONTROLLED_INTERNAL_WAREHOUSES)}).",
+        f"  - Posibles consolidaciones en 1 pallet logico: {consolidation_count}",
+        f"  - Posibles multipallet validos: {multipallet_count}",
+        f"  - Posibles conflictos a resolver por fecha de fabricacion: {conflict_count}",
+    ]
+
+    if consolidation_lines:
+        sections.append("\n  DETALLE CONSOLIDACION:")
+        sections.extend(consolidation_lines[:10])
+    if multipallet_lines:
+        sections.append("\n  DETALLE MULTIPALLET:")
+        sections.extend(multipallet_lines[:10])
+    if conflict_lines:
+        sections.append("\n  DETALLE CONFLICTO:")
+        sections.extend(conflict_lines[:10])
+
+    sections.append("")
+    sections.append(
+        "  Nota: estos casos no bloquean el ETL por si mismos."
+    )
+    sections.append(
+        "  Si el archivo se bloquea, la causa real sera una validacion estructural o de negativos."
+    )
+    sections.append(f"{sep}")
+    return "\n".join(sections)
 
 
 def _format_location_issue(row: pd.Series, motivo: str) -> str:
@@ -423,6 +674,13 @@ def validate_location_structure(df: pd.DataFrame, filename: str) -> tuple[bool, 
         f"{sep}\n"
         "  DETALLE POR FILA:\n"
         f"{chr(10).join(issues)}\n"
+        f"{sep}\n"
+        "  Aclaracion: las consolidaciones, multipallets y conflictos operativos detectados antes\n"
+        "  no son la causa del bloqueo. Esos casos se resuelven en la capa de ocupacion por ubicacion.\n"
+        f"{sep}\n"
+        "  Motivo del bloqueo: la estructura fisica de la ubicacion es invalida, por eso\n"
+        "  el ETL no continua a transformacion, resolucion por ubicacion ni carga final.\n"
+        "  Primero se debe corregir el Excel para respetar camara, rack, nivel y posicion.\n"
         f"{sep}\n"
         "  Corrige estas ubicaciones en el Excel original y vuelve a ejecutar.\n"
         f"{sep}"

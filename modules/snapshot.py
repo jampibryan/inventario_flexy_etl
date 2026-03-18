@@ -1,8 +1,39 @@
 import hashlib
+import re
 
 import pandas as pd
 
-from modules.ubicaciones import sanitize_fact_ubicaciones
+from modules.ubicaciones import sanitize_fact_ubicaciones, strip_accents
+
+
+def _canonicalize_columns(fact: pd.DataFrame) -> pd.DataFrame:
+    canonical_map = {
+        "ALMACEN": "ALMACÉN",
+        "ALMACN": "ALMACÉN",
+        "CAMARA": "CÁMARA",
+        "CMARA": "CÁMARA",
+        "POSICION": "POSICIÓN",
+        "POSICIN": "POSICIÓN",
+        "CODIGO": "CÓDIGO",
+        "CDIGO": "CÓDIGO",
+        "PRESENTACION": "PRESENTACIÓN",
+        "PRESENTACIN": "PRESENTACIÓN",
+        "FECHA FABRICACION": "FECHA FABRICACIÓN",
+        "FECHA FABRICACIN": "FECHA FABRICACIÓN",
+        "CLASIFICACION": "CLASIFICACIÓN",
+        "CLASIFICACIN": "CLASIFICACIÓN",
+    }
+    rename_map: dict[str, str] = {}
+
+    for column in fact.columns:
+        normalized = strip_accents(str(column)).upper()
+        normalized = re.sub(r"[^A-Z0-9 ]+", "", normalized)
+        normalized = " ".join(normalized.split())
+        rename_target = canonical_map.get(normalized)
+        if rename_target:
+            rename_map[column] = rename_target
+
+    return fact.rename(columns=rename_map)
 
 
 def build_fact_snapshot(
@@ -10,65 +41,37 @@ def build_fact_snapshot(
     source_file: str,
     valid_ubicacion_keys: set[str],
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    fact = df.copy()
-
-    def obtener_variedad(row: pd.Series) -> str | None:
-        prod = str(row["PRODUCTO"]).strip().upper()
-        present = str(row["PRESENTACI\u00d3N"]).strip().upper()
-        if prod == "MANGO":
-            if "EDWARD" in present:
-                return "EDWARD"
-            if "KENT" in present:
-                return "KENT"
-            return "OTROS"
-        if prod == "FRESA":
-            return "SABRINA"
-        if prod == "PALTA":
-            return "HASS"
-        if prod == "GRANADA":
-            return "WONDERFUL"
-        if prod == "MARACUYA":
-            return "CRIOLLA"
-        if prod == "PI\u00d1A":
-            return "GOLDEN"
-        return None
-
-    def obtener_clasificacion(row: pd.Series) -> str | None:
-        return row["CLASIFICACI\u00d3N"]
-
-    def obtener_calidad(row: pd.Series) -> str | None:
-        prod = str(row["PRODUCTO"]).strip().upper()
-        if prod == "MANGO":
-            return None
-        return "EST\u00c1NDAR"
-
-    fact["VARIEDAD"] = fact.apply(obtener_variedad, axis=1)
-    fact["CLASIFICACI\u00d3N"] = fact.apply(obtener_clasificacion, axis=1)
-    fact["CALIDAD"] = fact.apply(obtener_calidad, axis=1)
-    fact["TIPO DE CORTE"] = pd.Series(pd.NA, index=fact.index, dtype="string")
+    fact = _canonicalize_columns(df.copy())
 
     fact["FECHA CORTE"] = pd.to_datetime(fact["FECHA CORTE"], errors="coerce")
     fact["fecha_key"] = fact["FECHA CORTE"].dt.strftime("%Y%m%d").astype(int)
-
     fact["cliente_key"] = fact["CLIENTE"].astype(str).str.strip().str.upper()
-    fact["producto_key"] = fact["C\u00d3DIGO"].astype(str).str.strip().str.upper()
+    fact["producto_key"] = fact["CÓDIGO"].astype(str).str.strip().str.upper()
 
-    fact["almacen_grupo"] = fact["ALMAC\u00c9N"].astype(str).str.upper()
+    fact["almacen_grupo"] = fact["ALMACÉN"].astype(str).str.upper()
     fact["tipo_almacen"] = fact["almacen_grupo"].apply(
-        lambda x: "INTERNO" if x == "CHAVIN" else "EXTERNO" 
+        lambda value: "INTERNO" if value == "CHAVIN" else "EXTERNO"
     )
 
     fact["pallets"] = 1
     fact["source_file"] = source_file
-    if "_SOURCE_ROW_NUM" in fact.columns:
+
+    if "source_row_num" in fact.columns:
+        fact["source_row_num"] = pd.to_numeric(fact["source_row_num"], errors="coerce").astype("Int64")
+    elif "_SOURCE_ROW_NUM" in fact.columns:
         fact["source_row_num"] = pd.to_numeric(fact["_SOURCE_ROW_NUM"], errors="coerce").astype("Int64")
         fact.drop(columns=["_SOURCE_ROW_NUM"], inplace=True)
     else:
-        fact["source_row_num"] = range(2, len(fact) + 2)
+        fact["source_row_num"] = pd.Series(range(2, len(fact) + 2), dtype="Int64")
+
+    def _snapshot_token(row: pd.Series) -> str:
+        if pd.notna(row.get("pallet_logico_id")):
+            return str(row["pallet_logico_id"])
+        return str(row.get("source_row_num"))
 
     fact["snapshot_row_id"] = fact.apply(
-        lambda r: hashlib.sha1(
-            f"{r['FECHA CORTE'].date()}|{source_file}|{r['source_row_num']}".encode("utf-8")
+        lambda row: hashlib.sha1(
+            f"{row['FECHA CORTE'].date()}|{source_file}|{_snapshot_token(row)}".encode("utf-8")
         ).hexdigest(),
         axis=1,
     )
