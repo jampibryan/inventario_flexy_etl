@@ -1,10 +1,15 @@
 from pathlib import Path
 import re
 import unicodedata
+import warnings
 
 import pandas as pd
 
-from config import CONTROLLED_INTERNAL_WAREHOUSES, EXPECTED_COLUMNS
+from config import (
+    BLOCK_ON_INVALID_LOCATION_STRUCTURE,
+    CONTROLLED_INTERNAL_WAREHOUSES,
+    EXPECTED_COLUMNS,
+)
 from modules.dimensiones import CAPACITY_CONFIG
 from modules.ubicaciones import (
     CONTROLLED_INTERNAL_WAREHOUSE_SET,
@@ -78,7 +83,13 @@ def read_excel_file(file_path: Path) -> pd.DataFrame:
     """
     Lee el archivo Excel original.
     """
-    df = pd.read_excel(file_path)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Cannot parse header or footer so it will be ignored",
+            category=UserWarning,
+        )
+        df = pd.read_excel(file_path)
     df = _normalize_dataframe_columns(df)
     df["_source_row_num"] = df.index + 2
     return df
@@ -217,8 +228,7 @@ def validate_no_negatives(df: pd.DataFrame, filename: str) -> tuple[bool, str, p
     elimina ambas filas y permite continuar. Si quedan negativos no resueltos,
     el archivo se bloquea.
     """
-    warnings = []
-    detail_lines = []
+    warning_counts: list[str] = []
     df_check = _prepare_numeric_validation_frame(df)
     drop_indices, compensated_detail_lines = _find_compensated_negative_pairs(df_check)
 
@@ -235,50 +245,22 @@ def validate_no_negatives(df: pd.DataFrame, filename: str) -> tuple[bool, str, p
         if neg_mask.any():
             count = int(neg_mask.sum())
             total_negativos += count
-            warnings.append(f"  - {col}: {count} valor(es) negativo(s)")
+            warning_counts.append(f"{col}: {count}")
 
-            neg_data = df_filtered_check[neg_mask]
-            for idx, row in neg_data.iterrows():
-                fila_excel = idx + 2
-                codigo = row.get("C\u00f3digo", "?")
-                producto = row.get("Producto", "?")
-                valor = row[col]
-                detail_lines.append(
-                    f"     -> Fila {fila_excel} | {col} = {valor} | Codigo: {codigo} | Producto: {producto}"
-                )
-
-    if warnings:
-        sep = "=" * 70
-        header = (
-            f"\n{sep}\n"
-            f"  ARCHIVO BLOQUEADO: {filename}\n"
-            f"  Total valores negativos encontrados: {total_negativos}\n"
-            f"{sep}"
+    if warning_counts:
+        resumen = ", ".join(warning_counts)
+        msg = (
+            f"[REVISION_EXCEL] {filename} | bloqueado por valores negativos | "
+            f"total={total_negativos} | detalle={resumen}. "
+            "Corrige el Excel original y vuelve a ejecutar."
         )
-        resumen = "\n".join(warnings)
-        detalle_header = "\n  DETALLE POR FILA:"
-        detalle = "\n".join(detail_lines)
-        compensadas = ""
-        if compensated_detail_lines:
-            compensadas = (
-                "\n\n  FILAS ELIMINADAS AUTOMATICAMENTE POR COMPENSACION:\n"
-                + "\n".join(compensated_detail_lines)
-            )
-        footer = f"\n  Corrige estos valores en el Excel original y vuelve a ejecutar.\n{sep}"
-        msg = f"{header}\n{resumen}\n{detalle_header}\n{detalle}{compensadas}\n{footer}"
         return False, msg, df
 
     if compensated_detail_lines:
-        sep = "=" * 70
         msg = (
-            f"\n{sep}\n"
-            f"  ARCHIVO AJUSTADO: {filename}\n"
-            f"  Se eliminaron {len(drop_indices)} fila(s) porque formaban pares consecutivos\n"
-            f"  en la misma Ubicacion y cuya suma en Cantidad y Presentacion era 0.\n"
-            f"{sep}\n"
-            "  DETALLE DE FILAS ELIMINADAS:\n"
-            f"{chr(10).join(compensated_detail_lines)}\n"
-            f"{sep}"
+            f"[REVISION_EXCEL] {filename} | ajuste automatico aplicado | "
+            f"filas_eliminadas={len(drop_indices)} por compensacion exacta "
+            "en Cantidad y Presentacion."
         )
         return True, msg, df_filtered
 
@@ -403,9 +385,6 @@ def summarize_operational_resolution_candidates(df: pd.DataFrame, filename: str)
     if df_check.empty:
         return ""
 
-    consolidation_lines: list[str] = []
-    conflict_lines: list[str] = []
-    multipallet_lines: list[str] = []
     consolidation_count = 0
     conflict_count = 0
     multipallet_count = 0
@@ -424,15 +403,6 @@ def summarize_operational_resolution_candidates(df: pd.DataFrame, filename: str)
 
         if same_identity_groups:
             consolidation_count += len(same_identity_groups)
-            for candidate_group in same_identity_groups[:3]:
-                sample = candidate_group.iloc[0]
-                total_cajas = pd.to_numeric(candidate_group["cantidad_display"], errors="coerce").fillna(0).sum()
-                filas = ",".join(str(int(value)) for value in candidate_group["_source_row_num"].tolist())
-                consolidation_lines.append(
-                    f"     -> Filas {filas} | Ubicacion {ubicacion} | Codigo {sample['codigo_display']} | "
-                    f"Se detecto el mismo pallet en varias filas. "
-                    f"Se consolidara en 1 pallet logico con {int(total_cajas)} cajas."
-                )
 
         distinct_codes = group["codigo_norm"].nunique(dropna=True)
         if distinct_codes > 1:
@@ -454,73 +424,19 @@ def summarize_operational_resolution_candidates(df: pd.DataFrame, filename: str)
 
             if small_pallets:
                 multipallet_count += 1
-                filas = ",".join(
-                    str(int(value))
-                    for value in (
-                        pd.to_numeric(group["_source_row_num"], errors="coerce")
-                        .dropna()
-                        .astype(int)
-                        .tolist()
-                    )
-                )
-                multipallet_lines.append(
-                    f"     -> Filas {filas} | Ubicacion {ubicacion} | Codigos {other_codes} | "
-                    "Se detecto multipallet pequeno. "
-                    "Se conservaran 2 pallets logicos en 1 sola ubicacion si la regla de compatibilidad aplica."
-                )
             else:
                 conflict_count += 1
-                fecha_latest = latest["fecha_fabricacion_dt"]
-                fecha_latest_str = fecha_latest.strftime("%Y-%m-%d") if pd.notna(fecha_latest) else "[SIN FECHA]"
-                filas = ",".join(
-                    str(int(value))
-                    for value in (
-                        pd.to_numeric(group["_source_row_num"], errors="coerce")
-                        .dropna()
-                        .astype(int)
-                        .tolist()
-                    )
-                )
-                conflict_lines.append(
-                    f"     -> Filas {filas} | Ubicacion {ubicacion} | Codigos {other_codes} | "
-                    f"Incongruencia detectada. Inventario limpio: solo queda {latest['codigo_display']} "
-                    f"(Fecha Fabricacion {fecha_latest_str}). Los demas registros de esa ubicacion "
-                    "se eliminan del inventario limpio y quedan solo en auditoria."
-                )
 
     if consolidation_count == 0 and conflict_count == 0 and multipallet_count == 0:
         return ""
 
-    sep = "=" * 90
-    sections = [
-        f"\n{sep}",
-        f"  ANALISIS OPERATIVO PREVIO: {filename}",
-        "  Incongruencias operativas detectadas antes de resolver por ubicacion:",
-        f"  Alcance: solo almacenes internos controlados ({', '.join(CONTROLLED_INTERNAL_WAREHOUSES)}).",
-        f"  - Posibles consolidaciones en 1 pallet logico: {consolidation_count}",
-        f"  - Posibles multipallet validos: {multipallet_count}",
-        f"  - Posibles conflictos a resolver por fecha de fabricacion: {conflict_count}",
-    ]
-
-    if consolidation_lines:
-        sections.append("\n  DETALLE CONSOLIDACION:")
-        sections.extend(consolidation_lines[:10])
-    if multipallet_lines:
-        sections.append("\n  DETALLE MULTIPALLET:")
-        sections.extend(multipallet_lines[:10])
-    if conflict_lines:
-        sections.append("\n  DETALLE CONFLICTO:")
-        sections.extend(conflict_lines[:10])
-
-    sections.append("")
-    sections.append(
-        "  Nota: estos casos no bloquean el ETL por si mismos."
+    return (
+        f"[REVISION_PREVIA] {filename} | "
+        f"consolidaciones={consolidation_count} | "
+        f"multipallet={multipallet_count} | "
+        f"conflictos={conflict_count}. "
+        "Estos casos no bloquean el ETL; se resuelven automaticamente."
     )
-    sections.append(
-        "  Si el archivo se bloquea, la causa real sera una validacion estructural o de negativos."
-    )
-    sections.append(f"{sep}")
-    return "\n".join(sections)
 
 
 def _format_location_issue(row: pd.Series, motivo: str) -> str:
@@ -666,23 +582,17 @@ def validate_location_structure(df: pd.DataFrame, filename: str) -> tuple[bool, 
         return True, ""
 
     sep = "=" * 90
+
+    if not BLOCK_ON_INVALID_LOCATION_STRUCTURE:
+        msg = (
+            f"[VALIDACION_UBICACION] {filename} | observaciones={len(issues)}. "
+            "Se continuara, pero esas ubicaciones no contaran como posiciones validas."
+        )
+        return True, msg
+
     msg = (
-        f"\n{sep}\n"
-        f"  ARCHIVO BLOQUEADO: {filename}\n"
-        f"  Total inconsistencias de estructura de ubicacion: {len(issues)}\n"
-        f"  Regla: las ubicaciones internas deben respetar CAPACITY_CONFIG.\n"
-        f"{sep}\n"
-        "  DETALLE POR FILA:\n"
-        f"{chr(10).join(issues)}\n"
-        f"{sep}\n"
-        "  Aclaracion: las consolidaciones, multipallets y conflictos operativos detectados antes\n"
-        "  no son la causa del bloqueo. Esos casos se resuelven en la capa de ocupacion por ubicacion.\n"
-        f"{sep}\n"
-        "  Motivo del bloqueo: la estructura fisica de la ubicacion es invalida, por eso\n"
-        "  el ETL no continua a transformacion, resolucion por ubicacion ni carga final.\n"
-        "  Primero se debe corregir el Excel para respetar camara, rack, nivel y posicion.\n"
-        f"{sep}\n"
-        "  Corrige estas ubicaciones en el Excel original y vuelve a ejecutar.\n"
-        f"{sep}"
+        f"[VALIDACION_UBICACION] {filename} | bloqueado | "
+        f"ubicaciones_invalidas={len(issues)}. "
+        "Corrige el Excel original para respetar camara, rack, nivel y posicion."
     )
     return False, msg

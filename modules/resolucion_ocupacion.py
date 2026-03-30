@@ -140,6 +140,10 @@ def resolve_multipallet_rule(
     if len(candidates) <= 1:
         return True, "SINGLE_PALLET", "Una sola unidad logica en la ubicacion."
 
+    default_max_logical_pallets = int(OCCUPANCY_RULES["default_max_logical_pallets_per_location"])
+    if len(candidates) > default_max_logical_pallets:
+        return False, "EXCESO_DE_PALLETS", "Hay mas pallets de los permitidos en una misma ubicacion."
+
     distinct_products = {
         _normalize_code(candidate["base_row"].get("CODIGO")) for candidate in candidates
     }
@@ -149,7 +153,7 @@ def resolve_multipallet_rule(
             continue
 
         max_logical_pallets = int(rule.get("max_logical_pallets", OCCUPANCY_RULES["default_max_logical_pallets_per_location"]))
-        max_total_boxes = int(rule.get("max_total_boxes", capacity_limit))
+        max_total_boxes = min(int(rule.get("max_total_boxes", capacity_limit)), capacity_limit)
         max_boxes_per_pallet = int(rule.get("max_boxes_per_pallet", max_total_boxes))
         min_boxes_per_pallet = int(rule.get("min_boxes_per_pallet", 1))
         require_distinct_products = bool(rule.get("require_distinct_products", False))
@@ -167,7 +171,10 @@ def resolve_multipallet_rule(
 
         return True, str(rule["rule_name"]), "Ubicacion valida segun regla de compatibilidad multipallet."
 
-    return False, "SIN_REGLA_COMPATIBILIDAD", "No existe una regla multipallet que valide la coexistencia en esta ubicacion."
+    if boxes_total <= capacity_limit:
+        return True, "CAPACIDAD_UBICACION", "Coexistencia valida porque el total de cajas cabe en la capacidad de la ubicacion."
+
+    return False, "EXCESO_CAPACIDAD_UBICACION", "La suma de cajas excede la capacidad de la ubicacion."
 
 
 def _derive_location_capacity(candidates: list[dict[str, Any]]) -> int:
@@ -207,6 +214,125 @@ def _candidate_recency_key(candidate: dict[str, Any]) -> tuple[int, int, int]:
     return (fecha_fabricacion_value, fecha_caducidad_value, source_row_num_value)
 
 
+def _candidate_fabrication_date(candidate: dict[str, Any]) -> pd.Timestamp:
+    return pd.to_datetime(candidate["base_row"].get("FECHA FABRICACION"), errors="coerce")
+
+
+def _same_presentation_group_key(candidate: dict[str, Any]) -> tuple[str, ...]:
+    base_row = candidate["base_row"]
+    return (
+        _normalize_text(base_row.get("CLIENTE")),
+        _normalize_code(base_row.get("CODIGO")),
+        _normalize_text(base_row.get("PRODUCTO")),
+        _normalize_text(base_row.get("PRESENTACION")),
+        _normalize_text(base_row.get("ESTADO PRODUCTO")),
+    )
+
+
+def _collapse_same_presentation_candidates(
+    candidates: list[dict[str, Any]],
+    source_file: str,
+    ubicacion_key: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int]:
+    if len(candidates) <= 1:
+        return candidates, [], [], 0
+
+    merge_gap_days = int(OCCUPANCY_RULES.get("same_presentation_merge_max_gap_days", 45))
+    normalized_candidates: list[dict[str, Any]] = []
+    prebuilt_audit_rows: list[dict[str, Any]] = []
+    case_records: list[dict[str, Any]] = []
+    discarded_rows = 0
+
+    grouped_candidates: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        grouped_candidates.setdefault(_same_presentation_group_key(candidate), []).append(candidate)
+
+    for group in grouped_candidates.values():
+        if len(group) == 1:
+            normalized_candidates.extend(group)
+            continue
+
+        fabrication_dates = [_candidate_fabrication_date(candidate) for candidate in group]
+        valid_dates = [value for value in fabrication_dates if pd.notna(value)]
+        max_gap_days: int | None = None
+        if len(valid_dates) == len(group):
+            max_gap_days = int((max(valid_dates) - min(valid_dates)).days)
+
+        group_boxes_total = int(sum(candidate["base_row"]["CANTIDAD CAJAS"] for candidate in group))
+        group_capacity_limit = _derive_location_capacity(group)
+        group_rules_used = sorted({str(candidate["base_row"]["regla_capacidad_pallet"]) for candidate in group})
+        group_rules_used_str = ",".join(group_rules_used)
+
+        if max_gap_days is not None and max_gap_days <= merge_gap_days:
+            merged_rows = pd.concat([candidate["rows"] for candidate in group], ignore_index=True)
+            merged_candidate = _build_candidate_payload(merged_rows, source_file, ubicacion_key)
+            merged_candidate["base_row"]["normalizacion_presentacion"] = "REINGRESO_MISMA_PRESENTACION"
+            normalized_candidates.append(merged_candidate)
+            case_records.append(
+                _build_location_case_record(
+                    ubicacion_key=ubicacion_key,
+                    candidates=group,
+                    tipo_caso="REINGRESO_MISMA_PRESENTACION",
+                    cajas_totales=group_boxes_total,
+                    capacidad_permitida=group_capacity_limit,
+                    decision="Se trata como un solo pallet porque la misma presentacion regreso a la misma ubicacion con fecha cercana.",
+                    detalle=(
+                        f"Se detectaron {len(group)} registros de la misma presentacion con fechas de fabricacion separadas por "
+                        f"{max_gap_days} dias. Se consolidan como 1 solo pallet logico."
+                    ),
+                )
+            )
+            continue
+
+        winner = max(group, key=_candidate_recency_key)
+        winner_date = _candidate_fabrication_date(winner)
+        winner_date_text = winner_date.strftime("%Y-%m-%d") if pd.notna(winner_date) else "SIN_FECHA"
+        winner["base_row"]["normalizacion_presentacion"] = "MISMA_PRESENTACION_MAS_RECIENTE"
+        normalized_candidates.append(winner)
+        case_records.append(
+            _build_location_case_record(
+                ubicacion_key=ubicacion_key,
+                candidates=group,
+                tipo_caso="MISMA_PRESENTACION_MAS_RECIENTE",
+                cajas_totales=group_boxes_total,
+                capacidad_permitida=group_capacity_limit,
+                decision="Se conserva solo el pallet mas actual porque la misma presentacion aparece con fechas demasiado alejadas.",
+                detalle=(
+                    f"Las fechas de fabricacion no son cercanas"
+                    f"{f' ({max_gap_days} dias de diferencia)' if max_gap_days is not None else ''}. "
+                    f"Se conserva el registro mas reciente con fecha {winner_date_text}."
+                ),
+            )
+        )
+
+        for candidate in group:
+            if candidate is winner:
+                continue
+
+            discarded_rows += int(len(candidate["rows"]))
+            prebuilt_audit_rows.extend(
+                _build_audit_rows(
+                    candidate=candidate,
+                    pallet_logico_id=None,
+                    tipo_registro="DESCARTADO_CONFLICTO",
+                    registro_vigente_flag=0,
+                    conflicto_flag=1,
+                    sobrecapacidad_flag=0,
+                    detalle_resolucion=(
+                        "Misma presentacion en la misma ubicacion, pero con fecha de fabricacion demasiado alejada. "
+                        "Se conserva solo el pallet mas reciente."
+                    ),
+                    pallets_logicos_ubicacion=len(group),
+                    cajas_totales_ubicacion=group_boxes_total,
+                    max_cajas_permitidas_ubicacion=group_capacity_limit,
+                    reglas_capacidad_ubicacion=group_rules_used_str,
+                    regla_compatibilidad_ubicacion="MISMA_PRESENTACION_MAS_RECIENTE",
+                )
+            )
+
+    return normalized_candidates, prebuilt_audit_rows, case_records, discarded_rows
+
+
 def _build_candidate_payload(
     candidate_rows: pd.DataFrame,
     source_file: str,
@@ -242,30 +368,75 @@ def _build_candidate_payload(
     }
 
 
-def _build_conflict_overcapacity_audit_rows(
-    winner: dict[str, Any],
-    pallets_logicos_ubicacion: int,
-    cajas_totales_ubicacion: int,
-    reglas_capacidad_ubicacion: str,
-    regla_compatibilidad_ubicacion: str,
-) -> list[dict[str, Any]]:
-    return _build_audit_rows(
-        candidate=winner,
-        pallet_logico_id=None,
-        tipo_registro="ERROR_SOBRECAPACIDAD_CONFLICTO",
-        registro_vigente_flag=0,
-        conflicto_flag=1,
-        sobrecapacidad_flag=1,
-        detalle_resolucion=(
-            "El registro mas reciente fue identificado como vigente para resolver el conflicto, "
-            "pero aun asi excede la capacidad maxima permitida en cajas."
-        ),
-        pallets_logicos_ubicacion=pallets_logicos_ubicacion,
-        cajas_totales_ubicacion=cajas_totales_ubicacion,
-        max_cajas_permitidas_ubicacion=int(winner["base_row"]["max_cajas_permitidas_pallet"]),
-        reglas_capacidad_ubicacion=reglas_capacidad_ubicacion,
-        regla_compatibilidad_ubicacion=regla_compatibilidad_ubicacion,
+def _candidate_source_rows(candidate: dict[str, Any]) -> list[int]:
+    return (
+        pd.to_numeric(candidate["rows"]["source_row_num"], errors="coerce")
+        .dropna()
+        .astype(int)
+        .tolist()
     )
+
+
+def _candidate_codes(candidates: list[dict[str, Any]]) -> str:
+    codes = sorted({_normalize_code(candidate["base_row"].get("CODIGO")) for candidate in candidates if _normalize_code(candidate["base_row"].get("CODIGO"))})
+    return ", ".join(codes)
+
+
+def _candidate_details(candidates: list[dict[str, Any]]) -> str:
+    details: list[str] = []
+
+    for candidate in candidates:
+        base_row = candidate["base_row"]
+        codigo = _normalize_code(base_row.get("CODIGO")) or "SIN_CODIGO"
+        lote = _normalize_text(base_row.get("LOTE")) or "SIN_LOTE"
+        fecha_fabricacion = _normalize_date_token(base_row.get("FECHA FABRICACION")) or "SIN_FECHA"
+        cajas = int(pd.to_numeric(base_row.get("CANTIDAD CAJAS"), errors="coerce") or 0)
+        details.append(
+            f"{codigo} | lote {lote} | fabricacion {fecha_fabricacion} | cajas {cajas}"
+        )
+
+    return " || ".join(details)
+
+
+def _location_label(candidates: list[dict[str, Any]], ubicacion_key: str) -> str:
+    if not candidates:
+        return ubicacion_key
+
+    base_row = candidates[0]["base_row"]
+    camara = base_row.get("CAMARA", "")
+    rack = base_row.get("RACK", "")
+    nivel = base_row.get("NIVEL", "")
+    posicion = base_row.get("POSICION", "")
+    return f"{camara} | Rack {rack} | Nivel {nivel} | Posicion {posicion}"
+
+
+def _build_location_case_record(
+    *,
+    ubicacion_key: str,
+    candidates: list[dict[str, Any]],
+    tipo_caso: str,
+    cajas_totales: int,
+    capacidad_permitida: int,
+    decision: str,
+    detalle: str,
+) -> dict[str, Any]:
+    filas_origen: list[int] = []
+    for candidate in candidates:
+        filas_origen.extend(_candidate_source_rows(candidate))
+
+    return {
+        "ubicacion_key": ubicacion_key,
+        "ubicacion": _location_label(candidates, ubicacion_key),
+        "tipo_caso": tipo_caso,
+        "pallets_detectados": len(candidates),
+        "cajas_totales": int(cajas_totales),
+        "capacidad_permitida": int(capacidad_permitida),
+        "codigos_detectados": _candidate_codes(candidates),
+        "detalle_pallets": _candidate_details(candidates),
+        "filas_origen": ",".join(str(value) for value in sorted(filas_origen)),
+        "decision": decision,
+        "detalle": detalle,
+    }
 
 
 def _build_clean_row(
@@ -440,6 +611,7 @@ def resolve_location_occupancy(
         "discarded_rows": 0,
         "overcapacity_locations": 0,
         "audit_rows": 0,
+        "location_cases": [],
     }
 
     passthrough_mask = work["tipo_ubicacion_preliminar"] != POSICION_LABEL
@@ -450,7 +622,6 @@ def resolve_location_occupancy(
 
     position_rows = work[~passthrough_mask].copy()
     max_logical_pallets = int(OCCUPANCY_RULES["default_max_logical_pallets_per_location"])
-    allow_mixed_products = bool(OCCUPANCY_RULES.get("allow_mixed_products_within_location", True))
 
     for ubicacion_key, location_rows in position_rows.groupby("ubicacion_key_candidata", dropna=False):
         if pd.isna(ubicacion_key):
@@ -464,26 +635,150 @@ def resolve_location_occupancy(
         for _, candidate_rows in location_rows.groupby("identity_key", dropna=False):
             candidates.append(_build_candidate_payload(candidate_rows, source_file, str(ubicacion_key)))
 
+        candidates, prebuilt_audit_rows, prebuilt_case_records, prebuilt_discarded_rows = _collapse_same_presentation_candidates(
+            candidates,
+            source_file,
+            str(ubicacion_key),
+        )
+        audit_rows.extend(prebuilt_audit_rows)
+        summary["location_cases"].extend(prebuilt_case_records)
+        summary["discarded_rows"] += int(prebuilt_discarded_rows)
+
         boxes_total = int(sum(candidate["base_row"]["CANTIDAD CAJAS"] for candidate in candidates))
         capacity_limit = _derive_location_capacity(candidates)
         rules_used = sorted({str(candidate["base_row"]["regla_capacidad_pallet"]) for candidate in candidates})
         rules_used_str = ",".join(rules_used)
         logical_pallets_in_location = len(candidates)
-        mixed_products = len({_normalize_code(candidate["base_row"].get("CODIGO")) for candidate in candidates}) > 1
         compatibility_allowed, compatibility_rule_name, compatibility_reason = resolve_multipallet_rule(
             candidates,
             boxes_total,
             capacity_limit,
         )
-        conflict_by_mix = mixed_products and not (allow_mixed_products or compatibility_allowed)
-        conflict_by_count = logical_pallets_in_location > max_logical_pallets
-        if conflict_by_count or conflict_by_mix:
+        too_many_pallets = logical_pallets_in_location > max_logical_pallets
+        is_repeated_location = len(location_rows) > 1
+
+        if logical_pallets_in_location == 1 and boxes_total > capacity_limit:
+            summary["overcapacity_locations"] += 1
+            summary["discarded_rows"] += int(len(location_rows))
+            summary["location_cases"].append(
+                _build_location_case_record(
+                    ubicacion_key=str(ubicacion_key),
+                    candidates=candidates,
+                    tipo_caso="ERROR_SOBRECAPACIDAD",
+                    cajas_totales=boxes_total,
+                    capacidad_permitida=capacity_limit,
+                    decision="No se conserva el pallet porque excede la capacidad de la ubicacion.",
+                    detalle=(
+                        f"Se detectaron {boxes_total} cajas en una ubicacion cuya capacidad maxima es {capacity_limit}."
+                    ),
+                )
+            )
+            for candidate in candidates:
+                audit_rows.extend(
+                    _build_audit_rows(
+                        candidate=candidate,
+                        pallet_logico_id=None,
+                        tipo_registro="ERROR_SOBRECAPACIDAD",
+                        registro_vigente_flag=0,
+                        conflicto_flag=0,
+                        sobrecapacidad_flag=1,
+                        detalle_resolucion="Pallet descartado porque excede la capacidad maxima permitida de la ubicacion.",
+                        pallets_logicos_ubicacion=logical_pallets_in_location,
+                        cajas_totales_ubicacion=boxes_total,
+                        max_cajas_permitidas_ubicacion=capacity_limit,
+                        reglas_capacidad_ubicacion=rules_used_str,
+                        regla_compatibilidad_ubicacion=compatibility_rule_name,
+                    )
+                )
+            continue
+
+        if logical_pallets_in_location > 1 and compatibility_allowed and not too_many_pallets:
+            summary["multipallet_locations"] += 1
+            summary["location_cases"].append(
+                _build_location_case_record(
+                    ubicacion_key=str(ubicacion_key),
+                    candidates=candidates,
+                    tipo_caso="MULTIPALLET_VALIDO" if is_repeated_location else "UBICACION_VALIDA",
+                    cajas_totales=boxes_total,
+                    capacidad_permitida=capacity_limit,
+                    decision="Se conservan todos los pallets porque juntos caben dentro de la capacidad de la ubicacion.",
+                    detalle=(
+                        f"Se detectaron {logical_pallets_in_location} pallets y {boxes_total} cajas en total. "
+                        f"La capacidad permitida es {capacity_limit}."
+                    ),
+                )
+            )
+        elif logical_pallets_in_location > 1:
             summary["conflict_locations"] += 1
             candidates_sorted = sorted(
                 candidates,
                 key=lambda candidate: candidate["base_row"]["candidate_signature"],
             )
             winner = max(candidates_sorted, key=_candidate_recency_key)
+            winner_boxes = int(winner["base_row"]["CANTIDAD CAJAS"])
+            winner_capacity_limit = int(winner["base_row"]["max_cajas_permitidas_pallet"])
+
+            if winner_boxes > winner_capacity_limit:
+                summary["overcapacity_locations"] += 1
+                summary["discarded_rows"] += int(len(location_rows))
+                summary["location_cases"].append(
+                    _build_location_case_record(
+                        ubicacion_key=str(ubicacion_key),
+                        candidates=candidates,
+                        tipo_caso="ERROR_SOBRECAPACIDAD",
+                        cajas_totales=boxes_total,
+                        capacidad_permitida=capacity_limit,
+                        decision="No se conserva ningun pallet porque incluso el mas reciente supera la capacidad permitida.",
+                        detalle=(
+                            f"Se detectaron {logical_pallets_in_location} pallets y {boxes_total} cajas. "
+                            f"El pallet mas reciente por si solo tiene {winner_boxes} cajas y supera su limite de {winner_capacity_limit}."
+                        ),
+                    )
+                )
+                for candidate in candidates:
+                    audit_rows.extend(
+                        _build_audit_rows(
+                            candidate=candidate,
+                            pallet_logico_id=None,
+                            tipo_registro="ERROR_SOBRECAPACIDAD",
+                            registro_vigente_flag=0,
+                            conflicto_flag=1,
+                            sobrecapacidad_flag=1,
+                            detalle_resolucion=(
+                                "La ubicacion repetida excede la capacidad y ni siquiera el pallet mas reciente "
+                                "cabe por si solo dentro del limite permitido."
+                            ),
+                            pallets_logicos_ubicacion=logical_pallets_in_location,
+                            cajas_totales_ubicacion=boxes_total,
+                            max_cajas_permitidas_ubicacion=capacity_limit,
+                            reglas_capacidad_ubicacion=rules_used_str,
+                            regla_compatibilidad_ubicacion=compatibility_rule_name,
+                        )
+                    )
+                continue
+
+            resolution_reason = (
+                "el total de cajas excede la capacidad de la ubicacion"
+                if boxes_total > capacity_limit
+                else "hay mas pallets de los permitidos en una misma ubicacion"
+            )
+            winner_date = pd.to_datetime(winner["base_row"].get("FECHA FABRICACION"), errors="coerce")
+            winner_date_text = winner_date.strftime("%Y-%m-%d") if pd.notna(winner_date) else "SIN_FECHA"
+            summary["location_cases"].append(
+                _build_location_case_record(
+                    ubicacion_key=str(ubicacion_key),
+                    candidates=candidates,
+                    tipo_caso="REPETIDA_RESUELTA_MAS_RECIENTE",
+                    cajas_totales=boxes_total,
+                    capacidad_permitida=capacity_limit,
+                    decision="Se conserva solo el pallet mas reciente y se eliminan los anteriores.",
+                    detalle=(
+                        f"Se detectaron {logical_pallets_in_location} pallets y {boxes_total} cajas. "
+                        f"Como {resolution_reason}, se conserva el codigo {winner['base_row'].get('CODIGO')} "
+                        f"con fecha de fabricacion {winner_date_text}."
+                    ),
+                )
+            )
             winner_clean_row = _build_clean_row(
                 candidate=winner,
                 source_file=source_file,
@@ -497,42 +792,26 @@ def resolve_location_occupancy(
                 reglas_capacidad_ubicacion=rules_used_str,
                 regla_compatibilidad_ubicacion=compatibility_rule_name,
             )
-            winner_boxes = int(winner["base_row"]["CANTIDAD CAJAS"])
-            winner_capacity_limit = int(winner["base_row"]["max_cajas_permitidas_pallet"])
-
-            if winner_boxes > winner_capacity_limit:
-                summary["overcapacity_locations"] += 1
-                summary["discarded_rows"] += int(len(winner["rows"]))
-                audit_rows.extend(
-                    _build_conflict_overcapacity_audit_rows(
-                        winner=winner,
-                        pallets_logicos_ubicacion=logical_pallets_in_location,
-                        cajas_totales_ubicacion=boxes_total,
-                        reglas_capacidad_ubicacion=rules_used_str,
-                        regla_compatibilidad_ubicacion=compatibility_rule_name,
-                    )
+            clean_rows.append(winner_clean_row)
+            audit_rows.extend(
+                _build_audit_rows(
+                    candidate=winner,
+                    pallet_logico_id=winner_clean_row["pallet_logico_id"],
+                    tipo_registro="CONFLICTO_RESUELTO_MAS_RECIENTE",
+                    registro_vigente_flag=1,
+                    conflicto_flag=1,
+                    sobrecapacidad_flag=0,
+                    detalle_resolucion=(
+                        "La ubicacion se repite y ya no cabe dentro de la capacidad permitida. "
+                        f"Se conserva solo el pallet mas reciente ({winner_date_text})."
+                    ),
+                    pallets_logicos_ubicacion=logical_pallets_in_location,
+                    cajas_totales_ubicacion=boxes_total,
+                    max_cajas_permitidas_ubicacion=capacity_limit,
+                    reglas_capacidad_ubicacion=rules_used_str,
+                    regla_compatibilidad_ubicacion=compatibility_rule_name,
                 )
-            else:
-                clean_rows.append(winner_clean_row)
-                audit_rows.extend(
-                    _build_audit_rows(
-                        candidate=winner,
-                        pallet_logico_id=winner_clean_row["pallet_logico_id"],
-                        tipo_registro="CONFLICTO_RESUELTO_MAS_RECIENTE",
-                        registro_vigente_flag=1,
-                        conflicto_flag=1,
-                        sobrecapacidad_flag=0,
-                        detalle_resolucion=(
-                            "Se conserva el pallet logico mas reciente segun FECHA FABRICACION; "
-                            f"los demas se descartan por conflicto. Motivo: {compatibility_reason}"
-                        ),
-                        pallets_logicos_ubicacion=logical_pallets_in_location,
-                        cajas_totales_ubicacion=boxes_total,
-                        max_cajas_permitidas_ubicacion=winner_capacity_limit,
-                        reglas_capacidad_ubicacion=rules_used_str,
-                        regla_compatibilidad_ubicacion=compatibility_rule_name,
-                    )
-                )
+            )
 
             for candidate in candidates:
                 if candidate is winner:
@@ -547,8 +826,8 @@ def resolve_location_occupancy(
                         conflicto_flag=1,
                         sobrecapacidad_flag=0,
                         detalle_resolucion=(
-                            "Registro descartado porque coexistia con un pallet mas reciente en la misma ubicacion. "
-                            f"Motivo: {compatibility_reason}"
+                            "Registro descartado porque en la misma ubicacion ya no caben todos los pallets "
+                            "detectados y se priorizo el mas reciente por FECHA FABRICACION."
                         ),
                         pallets_logicos_ubicacion=logical_pallets_in_location,
                         cajas_totales_ubicacion=boxes_total,
@@ -559,42 +838,39 @@ def resolve_location_occupancy(
                 )
             continue
 
-        overcapacity = boxes_total > capacity_limit
-
-        if overcapacity:
-            summary["overcapacity_locations"] += 1
-            summary["discarded_rows"] += int(len(location_rows))
-            for candidate in candidates:
-                audit_rows.extend(
-                    _build_audit_rows(
-                        candidate=candidate,
-                        pallet_logico_id=None,
-                        tipo_registro="ERROR_SOBRECAPACIDAD",
-                        registro_vigente_flag=0,
-                        conflicto_flag=0,
-                        sobrecapacidad_flag=1,
-                        detalle_resolucion="Ubicacion descartada por superar la capacidad maxima configurada en cajas.",
-                        pallets_logicos_ubicacion=logical_pallets_in_location,
-                        cajas_totales_ubicacion=boxes_total,
-                        max_cajas_permitidas_ubicacion=capacity_limit,
-                        reglas_capacidad_ubicacion=rules_used_str,
-                        regla_compatibilidad_ubicacion=compatibility_rule_name,
-                    )
+        if logical_pallets_in_location == 1 and is_repeated_location and not prebuilt_case_records:
+            summary["location_cases"].append(
+                _build_location_case_record(
+                    ubicacion_key=str(ubicacion_key),
+                    candidates=candidates,
+                    tipo_caso="PALLET_CONSOLIDADO",
+                    cajas_totales=boxes_total,
+                    capacidad_permitida=capacity_limit,
+                    decision="Se unieron varias filas del mismo pallet en un solo registro.",
+                    detalle=(
+                        f"Se detectaron varias filas para un mismo pallet en la ubicacion. "
+                        f"El resultado final conserva {boxes_total} cajas."
+                    ),
                 )
-            continue
-
-        if logical_pallets_in_location > 1:
-            summary["multipallet_locations"] += 1
+            )
 
         for idx, candidate in enumerate(
             sorted(candidates, key=lambda item: item["base_row"]["candidate_signature"])
         ):
+            normalizacion_presentacion = str(candidate["base_row"].get("normalizacion_presentacion", ""))
+            conflicto_flag = 0
             if logical_pallets_in_location == 1:
-                tipo_registro = (
-                    "PALLET_LOGICO_CONSOLIDADO"
-                    if candidate["base_row"]["pallet_consolidado_flag"] == 1
-                    else "PALLET_LOGICO_DIRECTO"
-                )
+                if normalizacion_presentacion == "REINGRESO_MISMA_PRESENTACION":
+                    tipo_registro = "PALLET_REINGRESO_CONSOLIDADO"
+                elif normalizacion_presentacion == "MISMA_PRESENTACION_MAS_RECIENTE":
+                    tipo_registro = "CONFLICTO_RESUELTO_MAS_RECIENTE"
+                    conflicto_flag = 1
+                else:
+                    tipo_registro = (
+                        "PALLET_LOGICO_CONSOLIDADO"
+                        if candidate["base_row"]["pallet_consolidado_flag"] == 1
+                        else "PALLET_LOGICO_DIRECTO"
+                    )
             else:
                 tipo_registro = (
                     "MULTIPALLET_VALIDO_CONSOLIDADO"
@@ -607,7 +883,7 @@ def resolve_location_occupancy(
                 source_file=source_file,
                 tipo_registro=tipo_registro,
                 ubicacion_ocupada_flag=1 if idx == 0 else 0,
-                conflicto_flag=0,
+                conflicto_flag=conflicto_flag,
                 sobrecapacidad_flag=0,
                 pallets_logicos_ubicacion=logical_pallets_in_location,
                 cajas_totales_ubicacion=boxes_total,
@@ -616,15 +892,27 @@ def resolve_location_occupancy(
                 regla_compatibilidad_ubicacion=compatibility_rule_name,
             )
             clean_rows.append(clean_row)
+            if normalizacion_presentacion == "REINGRESO_MISMA_PRESENTACION":
+                detalle_resolucion = (
+                    "Misma presentacion en la misma ubicacion con fechas de fabricacion cercanas. "
+                    "Se trata como 1 solo pallet logico."
+                )
+            elif normalizacion_presentacion == "MISMA_PRESENTACION_MAS_RECIENTE":
+                detalle_resolucion = (
+                    "La misma presentacion aparece con fechas de fabricacion demasiado alejadas. "
+                    "Se conserva solo el pallet mas reciente."
+                )
+            else:
+                detalle_resolucion = "Registro vigente despues de resolver la ocupacion por ubicacion."
             audit_rows.extend(
                 _build_audit_rows(
                     candidate=candidate,
                     pallet_logico_id=clean_row["pallet_logico_id"],
                     tipo_registro=tipo_registro,
                     registro_vigente_flag=1,
-                    conflicto_flag=0,
+                    conflicto_flag=conflicto_flag,
                     sobrecapacidad_flag=0,
-                    detalle_resolucion="Registro vigente despues de resolver la ocupacion por ubicacion.",
+                    detalle_resolucion=detalle_resolucion,
                     pallets_logicos_ubicacion=logical_pallets_in_location,
                     cajas_totales_ubicacion=boxes_total,
                     max_cajas_permitidas_ubicacion=capacity_limit,

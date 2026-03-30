@@ -4,15 +4,56 @@ import re
 
 import pandas as pd
 
+from modules.productos import obtener_calidad, obtener_variedad
 from modules.resolucion_ocupacion import resolve_box_capacity_rule
-from modules.ubicaciones import build_ubicacion_key, strip_accents
+from modules.ubicaciones import POSICION_LABEL, build_ubicacion_key, strip_accents
 
 
 CAPACITY_CONFIG = [
-    {"camara": "C\u00c1MARA 01", "racks": 10, "niveles": 5, "posiciones": 15, "camara_orden": 1, "es_operativa": 1, "es_estructural": 1},
-    {"camara": "C\u00c1MARA 02", "racks": 20, "niveles": 3, "posiciones": 4, "camara_orden": 2, "es_operativa": 1, "es_estructural": 1},
-    {"camara": "C\u00c1MARA 03", "racks": 20, "niveles": 3, "posiciones": 4, "camara_orden": 3, "es_operativa": 1, "es_estructural": 1},
-    {"camara": "C\u00c1MARA 04", "racks": 13, "niveles": 11, "posiciones": 3, "camara_orden": 4, "es_operativa": 1, "es_estructural": 1},
+    {
+        "camara": "C\u00c1MARA 01",
+        "racks": 10,
+        "niveles": 5,
+        "posiciones": 15,
+        "camara_orden": 1,
+        "es_operativa": 1,
+        "es_estructural": 1,
+        "capacidad_operativa_real": 700,
+        "capacidad_operativa_mode": "MANUAL_TEMPORAL",
+    },
+    {
+        "camara": "C\u00c1MARA 02",
+        "racks": 20,
+        "niveles": 3,
+        "posiciones": 4,
+        "camara_orden": 2,
+        "es_operativa": 1,
+        "es_estructural": 1,
+        "capacidad_operativa_real": 232,
+        "capacidad_operativa_mode": "MANUAL_TEMPORAL",
+    },
+    {
+        "camara": "C\u00c1MARA 03",
+        "racks": 20,
+        "niveles": 3,
+        "posiciones": 4,
+        "camara_orden": 3,
+        "es_operativa": 1,
+        "es_estructural": 1,
+        "capacidad_operativa_real": 232,
+        "capacidad_operativa_mode": "MANUAL_TEMPORAL",
+    },
+    {
+        "camara": "C\u00c1MARA 04",
+        "racks": 13,
+        "niveles": 11,
+        "posiciones": 3,
+        "camara_orden": 4,
+        "es_operativa": 1,
+        "es_estructural": 1,
+        "capacidad_operativa_real": 429,
+        "capacidad_operativa_mode": "MANUAL_TEMPORAL",
+    },
 ]
 
 
@@ -80,38 +121,12 @@ def build_dim_producto(fact_df: pd.DataFrame) -> pd.DataFrame:
     fact_df = _canonicalize_product_fact_columns(fact_df.copy())
     df = fact_df[["C\u00d3DIGO", "PRODUCTO", "PRESENTACI\u00d3N", "CLASIFICACI\u00d3N"]].drop_duplicates().copy()
     df["producto"] = df["PRODUCTO"]
-
-    def obtener_variedad(row: pd.Series) -> str | None:
-        prod = str(row["PRODUCTO"]).strip().upper()
-        present = str(row["PRESENTACI\u00d3N"]).strip().upper()
-        if prod == "MANGO":
-            if "EDWARD" in present:
-                return "EDWARD"
-            if "KENT" in present:
-                return "KENT"
-            return "OTROS"
-        if prod == "FRESA":
-            return "SABRINA"
-        if prod == "PALTA":
-            return "HASS"
-        if prod == "GRANADA":
-            return "WONDERFUL"
-        if prod == "MARACUYA":
-            return "CRIOLLA"
-        if prod == "PI\u00d1A":
-            return "GOLDEN"
-        return None
-
-    df["variedad"] = df.apply(obtener_variedad, axis=1)
+    df["variedad"] = [
+        obtener_variedad(producto, presentacion)
+        for producto, presentacion in zip(df["PRODUCTO"], df["PRESENTACI\u00d3N"])
+    ]
     df["clasificacion"] = df["CLASIFICACI\u00d3N"]
-
-    def obtener_calidad(row: pd.Series) -> str | None:
-        prod = str(row["PRODUCTO"]).strip().upper()
-        if prod == "MANGO":
-            return None
-        return "EST\u00c1NDAR"
-
-    df["calidad"] = df.apply(obtener_calidad, axis=1)
+    df["calidad"] = [obtener_calidad(producto) for producto in df["PRODUCTO"]]
     df["tipo_corte"] = pd.Series(pd.NA, index=df.index, dtype="string")
     df["presentacion"] = df["PRESENTACI\u00d3N"]
     capacity_rules = df.apply(resolve_box_capacity_rule, axis=1)
@@ -149,12 +164,43 @@ MESES_ES = {
 def build_dim_fecha(fact_df: pd.DataFrame) -> pd.DataFrame:
     if fact_df.empty:
         return pd.DataFrame(
-            columns=["fecha_key", "fecha", "anio", "mes_numero", "mes", "anio_mes", "trimestre", "semana", "dia"]
+            columns=[
+                "fecha_key",
+                "fecha",
+                "anio",
+                "mes_numero",
+                "mes",
+                "anio_mes",
+                "trimestre",
+                "semana",
+                "dia",
+                "es_fecha_snapshot_flag",
+                "es_ultimo_snapshot_flag",
+            ]
         ).astype({"fecha_key": "Int64"})
 
-    fechas = pd.DataFrame({
-        "fecha": pd.to_datetime(fact_df["FECHA CORTE"]).dropna().sort_values().unique()
-    })
+    snapshot_dates = pd.to_datetime(fact_df["FECHA CORTE"], errors="coerce").dropna().dt.normalize()
+    if snapshot_dates.empty:
+        return pd.DataFrame(
+            columns=[
+                "fecha_key",
+                "fecha",
+                "anio",
+                "mes_numero",
+                "mes",
+                "anio_mes",
+                "trimestre",
+                "semana",
+                "dia",
+                "es_fecha_snapshot_flag",
+                "es_ultimo_snapshot_flag",
+            ]
+        ).astype({"fecha_key": "Int64"})
+
+    calendar_range = pd.date_range(snapshot_dates.min(), snapshot_dates.max(), freq="D")
+    fechas = pd.DataFrame({"fecha": calendar_range})
+    snapshot_date_set = set(snapshot_dates.unique().tolist())
+    latest_snapshot = snapshot_dates.max()
 
     fechas["fecha_key"] = fechas["fecha"].dt.strftime("%Y%m%d").astype(int)
     fechas["anio"] = fechas["fecha"].dt.year
@@ -164,6 +210,8 @@ def build_dim_fecha(fact_df: pd.DataFrame) -> pd.DataFrame:
     fechas["trimestre"] = "T" + fechas["fecha"].dt.quarter.astype(str)
     fechas["semana"] = fechas["fecha"].dt.isocalendar().week.astype(int)
     fechas["dia"] = fechas["fecha"].dt.day
+    fechas["es_fecha_snapshot_flag"] = fechas["fecha"].isin(snapshot_date_set).astype(int)
+    fechas["es_ultimo_snapshot_flag"] = fechas["fecha"].eq(latest_snapshot).astype(int)
     fechas["fecha"] = fechas["fecha"].dt.date
 
     return fechas
@@ -173,11 +221,18 @@ def build_dim_ubicacion() -> pd.DataFrame:
     rows = []
 
     for cfg in CAPACITY_CONFIG:
+        capacidad_estructural = int(cfg["racks"]) * int(cfg["niveles"]) * int(cfg["posiciones"])
+        capacidad_operativa_real = int(cfg.get("capacidad_operativa_real", capacidad_estructural))
+        capacidad_operativa_real = max(0, min(capacidad_operativa_real, capacidad_estructural))
+        mode = str(cfg.get("capacidad_operativa_mode", "FULL_STRUCTURE"))
+        secuencia = 0
+
         for rack, nivel, posicion in product(
             range(1, cfg["racks"] + 1),
             range(1, cfg["niveles"] + 1),
             range(1, cfg["posiciones"] + 1),
         ):
+            secuencia += 1
             rows.append({
                 "ubicacion_key": build_ubicacion_key(cfg["camara"], rack, nivel, posicion),
                 "almacen": "CHAVIN",
@@ -186,22 +241,94 @@ def build_dim_ubicacion() -> pd.DataFrame:
                 "nivel": nivel,
                 "posicion": posicion,
                 "camara_orden": cfg["camara_orden"],
-                "es_operativa": cfg["es_operativa"],
+                "es_operativa": 1 if int(cfg["es_operativa"]) == 1 and secuencia <= capacidad_operativa_real else 0,
                 "es_estructural": cfg["es_estructural"],
+                "capacidad_estructural_camara": capacidad_estructural,
+                "capacidad_operativa_real_camara": capacidad_operativa_real,
+                "capacidad_operativa_mode": mode,
+                "posicion_operativa_temporal_flag": 1 if secuencia <= capacidad_operativa_real else 0,
+                "secuencia_posicion_camara": secuencia,
             })
 
-    return pd.DataFrame(rows)
+    dim = pd.DataFrame(rows)
+    dim["ubicacion_invalida_estructura_flag"] = 0
+    return dim
+
+
+def append_observed_invalid_positions(
+    dim_ubicacion: pd.DataFrame,
+    fact_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if dim_ubicacion.empty or fact_df.empty:
+        return dim_ubicacion
+
+    required_columns = {"ubicacion_key", "CÁMARA", "RACK", "NIVEL", "POSICIÓN"}
+    if not required_columns.issubset(set(fact_df.columns)):
+        return dim_ubicacion
+
+    base_keys = set(dim_ubicacion["ubicacion_key"].dropna().astype(str))
+    observed = fact_df.copy()
+
+    if "tipo_ubicacion" in observed.columns:
+        observed = observed[observed["tipo_ubicacion"] == POSICION_LABEL].copy()
+
+    observed = observed[observed["ubicacion_key"].notna()].copy()
+    observed["ubicacion_key"] = observed["ubicacion_key"].astype(str)
+    observed = observed[~observed["ubicacion_key"].isin(base_keys)].copy()
+
+    if observed.empty:
+        return dim_ubicacion
+
+    observed_dim = (
+        observed[["ubicacion_key", "CÁMARA", "RACK", "NIVEL", "POSICIÓN"]]
+        .drop_duplicates()
+        .rename(
+            columns={
+                "CÁMARA": "camara",
+                "RACK": "rack",
+                "NIVEL": "nivel",
+                "POSICIÓN": "posicion",
+            }
+        )
+        .copy()
+    )
+    observed_dim["almacen"] = "CHAVIN"
+    observed_dim["camara_orden"] = observed_dim["camara"].astype(str).str.extract(r"(\d+)").fillna("999").astype(int)
+    observed_dim["es_operativa"] = 0
+    observed_dim["es_estructural"] = 0
+    observed_dim["capacidad_estructural_camara"] = 0
+    observed_dim["capacidad_operativa_real_camara"] = 0
+    observed_dim["capacidad_operativa_mode"] = "OBSERVADA_INVALIDA"
+    observed_dim["posicion_operativa_temporal_flag"] = 0
+    observed_dim["secuencia_posicion_camara"] = pd.NA
+    observed_dim["ubicacion_invalida_estructura_flag"] = 1
+
+    dim_final = pd.concat([dim_ubicacion, observed_dim], ignore_index=True, sort=False)
+    return dim_final
 
 
 def summarize_dim_ubicacion_operativa(dim_ubicacion: pd.DataFrame) -> pd.DataFrame:
     if dim_ubicacion.empty:
-        return pd.DataFrame(columns=["camara", "es_operativa", "ubicaciones"])
+        return pd.DataFrame(
+            columns=[
+                "camara",
+                "capacidad_estructural",
+                "capacidad_operativa_real",
+                "ubicaciones_es_operativa_1",
+                "ubicaciones_es_operativa_0",
+            ]
+        )
 
     summary = (
-        dim_ubicacion.groupby(["camara", "es_operativa"], dropna=False)
-        .size()
-        .reset_index(name="ubicaciones")
-        .sort_values(["camara", "es_operativa"])
+        dim_ubicacion.groupby("camara", dropna=False)
+        .agg(
+            capacidad_estructural=("es_estructural", "sum"),
+            capacidad_operativa_real=("es_operativa", "sum"),
+            ubicaciones_es_operativa_1=("es_operativa", "sum"),
+            ubicaciones_es_operativa_0=("es_operativa", lambda serie: int((serie == 0).sum())),
+        )
+        .reset_index()
+        .sort_values("camara")
         .reset_index(drop=True)
     )
     return summary

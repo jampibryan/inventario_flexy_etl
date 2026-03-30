@@ -1,5 +1,7 @@
+from dataclasses import dataclass
 from datetime import datetime
 import logging
+from pathlib import Path
 import sys
 
 import pandas as pd
@@ -8,6 +10,7 @@ from config import (
     AUDIT_PARTITIONED_DIR,
     BOX_CAPACITY_RULES,
     CONTROL_FILE,
+    FACT_ACTUAL_FILE,
     DIM_CLIENTE_FILE,
     DIM_FECHA_FILE,
     DIM_PRODUCTO_FILE,
@@ -22,6 +25,7 @@ from config import (
     PROCESADOS_AUDITORIA_DIR,
     PROCESADOS_DIR,
     PROCESADOS_EXCEL_DIR,
+    SNAPSHOT_CONTROL_FILE,
 )
 from modules.control import (
     add_control_record,
@@ -31,6 +35,7 @@ from modules.control import (
     save_control_file,
 )
 from modules.dimensiones import (
+    append_observed_invalid_positions,
     build_dim_cliente,
     build_dim_fecha,
     build_dim_producto,
@@ -47,6 +52,11 @@ from modules.extract import (
     validate_no_negatives,
 )
 from modules.file_manager import get_original_excel_files
+from modules.historico import (
+    build_fact_actual,
+    build_snapshot_control,
+    summarize_snapshot_control,
+)
 from modules.load import (
     purge_reprocess_outputs,
     save_daily_outputs,
@@ -60,6 +70,13 @@ from modules.resolucion_ocupacion import resolve_location_occupancy
 from modules.snapshot import build_fact_snapshot
 from modules.transform import transform_inventory
 from modules.utils import build_output_names, ensure_directories
+
+
+@dataclass(frozen=True)
+class OutputTargets:
+    excel_name: str
+    excel_output_path: Path
+    audit_workbook_path: Path
 
 
 def setup_logging() -> logging.Logger:
@@ -83,46 +100,72 @@ def setup_logging() -> logging.Logger:
 
 def log_ubicacion_audit(logger: logging.Logger, scope: str, audit: dict[str, object]) -> None:
     invalid_count = int(audit.get("invalid_position_count", 0))
-    invalid_keys = audit.get("invalid_position_keys", [])
-    invalid_rows = audit.get("invalid_rows")
 
     if invalid_count == 0:
-        logger.info(f"[INTEGRIDAD_UBICACION][{scope}] OK | sin pallets POSICION fuera de dim_ubicacion")
+        logger.info("[UBICACIONES][%s] sin observaciones", scope)
         return
 
-    logger.warning(
-        f"[INTEGRIDAD_UBICACION][{scope}] {invalid_count} pallet(s) con ubicacion candidata sin match en dim_ubicacion. "
-        "Fueron reclasificados a SIN_UBICACION y su ubicacion_key se dejo nula."
-    )
-
-    if invalid_keys:
+    if audit.get("invalid_positions_preserved"):
         logger.warning(
-            f"[INTEGRIDAD_UBICACION][{scope}] Claves fact sin match: {', '.join(map(str, invalid_keys))}"
-        )
-
-    if hasattr(invalid_rows, "empty") and not invalid_rows.empty:
-        logger.warning(
-            "[INTEGRIDAD_UBICACION][%s] Detalle primeras filas:\n%s",
+            "[UBICACIONES][%s] %s registro(s) con ubicacion observada fuera de la dimension base. "
+            "Se conservaron temporalmente.",
             scope,
-            invalid_rows.head(20).to_string(index=False),
+            invalid_count,
+        )
+    else:
+        logger.warning(
+            "[UBICACIONES][%s] %s registro(s) con ubicacion no valida. "
+            "Se enviaron a SIN_UBICACION.",
+            scope,
+            invalid_count,
         )
 
 
 def log_resolution_summary(logger: logging.Logger, scope: str, summary: dict[str, int]) -> None:
     logger.info(
-        "[RESOLUCION_OCUPACION][%s] filas_fuente=%s | pallets_logicos=%s | ubicaciones_ocupadas=%s | "
-        "pallets_consolidados=%s | ubicaciones_multipallet=%s | ubicaciones_conflicto=%s | "
-        "ubicaciones_sobrecapacidad=%s | filas_descartadas=%s",
+        "[RESUMEN][%s] filas=%s | pallets=%s | consolidados=%s | multipallet=%s | conflictos=%s | sobrecapacidad=%s",
         scope,
         summary.get("source_rows", 0),
         summary.get("logical_pallets", 0),
-        summary.get("occupied_locations", 0),
         summary.get("consolidated_pallets", 0),
         summary.get("multipallet_locations", 0),
         summary.get("conflict_locations", 0),
         summary.get("overcapacity_locations", 0),
-        summary.get("discarded_rows", 0),
     )
+
+
+def log_location_cases(logger: logging.Logger, scope: str, location_cases: list[dict[str, object]]) -> None:
+    separator = "-" * 70
+
+    if not location_cases:
+        logger.info(separator)
+        logger.info("[ANALISIS_UBICACIONES][%s] No se detectaron ubicaciones repetidas para revisar.", scope)
+        logger.info(separator)
+        return
+
+    logger.info(separator)
+    logger.info("[ANALISIS_UBICACIONES][%s] Se revisaron %s ubicacion(es) repetidas.", scope, len(location_cases))
+    logger.info("Regla aplicada: se compara la suma grupal de cajas de la ubicacion contra su capacidad.")
+    logger.info("Si la suma cabe, se conservan los pallets. Si no cabe, se conserva solo el mas reciente.")
+
+    for index, case in enumerate(location_cases, start=1):
+        logger.info(separator)
+        logger.info("CASO %s", index)
+        logger.info("Ubicacion revisada: %s", case.get("ubicacion", case.get("ubicacion_key", "")))
+        logger.info(
+            "Pallets detectados: %s | Cajas totales en la ubicacion: %s | Capacidad permitida: %s",
+            case.get("pallets_detectados", 0),
+            case.get("cajas_totales", 0),
+            case.get("capacidad_permitida", 0),
+        )
+        logger.info("Codigos detectados: %s", case.get("codigos_detectados", ""))
+        logger.info("Detalle por pallet: %s", case.get("detalle_pallets", ""))
+        logger.info("Filas del Excel involucradas: %s", case.get("filas_origen", ""))
+        logger.info("Que detecto el ETL: %s", case.get("tipo_caso", ""))
+        logger.info("Decision tomada: %s", case.get("decision", ""))
+        logger.info("Explicacion: %s", case.get("detalle", ""))
+
+    logger.info(separator)
 
 
 def refresh_dimensions_from_partitions(
@@ -131,17 +174,32 @@ def refresh_dimensions_from_partitions(
     log_dim_ubicacion: bool = False,
 ) -> None:
     fact_hist = build_fact_from_partitions(FACT_PARTITIONED_DIR)
+    dim_ubicacion_export = append_observed_invalid_positions(dim_ubicacion, fact_hist)
     dim_cliente = build_dim_cliente(fact_hist)
     dim_producto = build_dim_producto(fact_hist)
     dim_fecha = build_dim_fecha(fact_hist)
+    fact_actual = build_fact_actual(fact_hist)
+    snapshot_control = build_snapshot_control(FACT_PARTITIONED_DIR, AUDIT_PARTITIONED_DIR)
 
     save_parquet(dim_cliente, DIM_CLIENTE_FILE)
     save_parquet(dim_producto, DIM_PRODUCTO_FILE)
     save_parquet(dim_fecha, DIM_FECHA_FILE)
+    save_parquet(fact_actual, FACT_ACTUAL_FILE)
+    save_parquet(snapshot_control, SNAPSHOT_CONTROL_FILE)
     if log_dim_ubicacion:
-        save_and_validate_dim_ubicacion(logger, dim_ubicacion)
+        save_and_validate_dim_ubicacion(logger, dim_ubicacion_export)
     else:
-        save_parquet(dim_ubicacion, DIM_UBICACION_FILE)
+        save_parquet(dim_ubicacion_export, DIM_UBICACION_FILE)
+
+    snapshot_summary = summarize_snapshot_control(snapshot_control)
+    log_fn = logger.warning if snapshot_summary["integrity_error"] > 0 else logger.info
+    log_fn(
+        "[SNAPSHOTS] fechas=%s | integridad_ok=%s | integridad_error=%s | ultimo_snapshot=%s",
+        snapshot_summary["snapshots"],
+        snapshot_summary["integrity_ok"],
+        snapshot_summary["integrity_error"],
+        snapshot_summary["latest_rows"],
+    )
 
 
 def log_force_cleanup(logger: logging.Logger, filename: str, file_date: str, cleanup: dict[str, bool]) -> None:
@@ -186,7 +244,14 @@ def log_force_cleanup(logger: logging.Logger, filename: str, file_date: str, cle
 
 def log_dim_ubicacion_summary(logger: logging.Logger, scope: str, dim_ubicacion: pd.DataFrame) -> None:
     summary = summarize_dim_ubicacion_operativa(dim_ubicacion)
-    logger.info("[DIM_UBICACION][%s]\n%s", scope, summary.to_string(index=False))
+    logger.info(
+        "[DIM_UBICACION][%s] camaras=%s | estructural=%s | operativa=%s | no_operativa=%s",
+        scope,
+        len(summary),
+        int(summary["capacidad_estructural"].sum()) if not summary.empty else 0,
+        int(summary["capacidad_operativa_real"].sum()) if not summary.empty else 0,
+        int(summary["ubicaciones_es_operativa_0"].sum()) if not summary.empty else 0,
+    )
 
 
 def save_and_validate_dim_ubicacion(logger: logging.Logger, dim_ubicacion: pd.DataFrame) -> None:
@@ -196,9 +261,109 @@ def save_and_validate_dim_ubicacion(logger: logging.Logger, dim_ubicacion: pd.Da
     log_dim_ubicacion_summary(logger, "parquet_exportado", persisted_dim_ubicacion)
 
 
-def build_locked_fallback_output_path(path):
+def build_locked_fallback_output_path(path: Path) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return path.with_stem(f"{path.stem}_reproceso_{timestamp}")
+
+
+def build_output_targets(file_date: str) -> OutputTargets:
+    excel_name = build_output_names(file_date)
+    return OutputTargets(
+        excel_name=excel_name,
+        excel_output_path=PROCESADOS_EXCEL_DIR / excel_name,
+        audit_workbook_path=PROCESADOS_AUDITORIA_DIR / excel_name.replace(
+            "inventario_",
+            "auditoria_ocupacion_",
+        ),
+    )
+
+
+def register_control_status(
+    control_df: pd.DataFrame,
+    *,
+    archivo_original: str,
+    fecha_archivo: str,
+    estado: str,
+    observacion: str = "",
+    archivo_excel_salida: str = "",
+    archivo_csv_salida: str = "",
+) -> pd.DataFrame:
+    return add_control_record(
+        control_df=control_df,
+        archivo_original=archivo_original,
+        fecha_archivo=fecha_archivo,
+        estado=estado,
+        archivo_excel_salida=archivo_excel_salida,
+        archivo_csv_salida=archivo_csv_salida,
+        observacion=observacion,
+    )
+
+
+def apply_force_cleanup(
+    *,
+    logger: logging.Logger,
+    control_df: pd.DataFrame,
+    filename: str,
+    file_date: str,
+    output_targets: OutputTargets,
+) -> tuple[pd.DataFrame, OutputTargets]:
+    cleanup = purge_reprocess_outputs(
+        fecha_corte=file_date,
+        excel_output_path=output_targets.excel_output_path,
+        audit_workbook_path=output_targets.audit_workbook_path,
+        fact_partitioned_dir=FACT_PARTITIONED_DIR,
+        audit_partitioned_dir=AUDIT_PARTITIONED_DIR,
+    )
+    control_df = remove_control_records(control_df, filename, file_date)
+    log_force_cleanup(logger, filename, file_date, cleanup)
+
+    excel_output_path = output_targets.excel_output_path
+    audit_workbook_path = output_targets.audit_workbook_path
+
+    if cleanup.get("excel_locked"):
+        excel_output_path = build_locked_fallback_output_path(excel_output_path)
+        logger.warning(
+            "[FORCE_CLEANUP] %s | se usara una salida alterna para el Excel limpio: %s",
+            filename,
+            excel_output_path.name,
+        )
+
+    if cleanup.get("audit_workbook_locked"):
+        audit_workbook_path = build_locked_fallback_output_path(audit_workbook_path)
+        logger.warning(
+            "[FORCE_CLEANUP] %s | se usara una salida alterna para la auditoria Excel: %s",
+            filename,
+            audit_workbook_path.name,
+        )
+
+    return control_df, OutputTargets(
+        excel_name=output_targets.excel_name,
+        excel_output_path=excel_output_path,
+        audit_workbook_path=audit_workbook_path,
+    )
+
+
+def handle_blocked_file(
+    *,
+    logger: logging.Logger,
+    control_df: pd.DataFrame,
+    dim_ubicacion: pd.DataFrame,
+    filename: str,
+    file_date: str,
+    estado: str,
+    observacion: str,
+    warning_message: str,
+) -> pd.DataFrame:
+    control_df = register_control_status(
+        control_df,
+        archivo_original=filename,
+        fecha_archivo=file_date,
+        estado=estado,
+        observacion=observacion,
+    )
+    logger.warning(warning_message)
+    refresh_dimensions_from_partitions(logger, dim_ubicacion)
+    return control_df
 
 
 def main() -> None:
@@ -272,51 +437,32 @@ def main() -> None:
             if not date_ok:
                 raise ValueError(date_error)
 
-            excel_name = build_output_names(file_date)
-            excel_output_path = PROCESADOS_EXCEL_DIR / excel_name
-            audit_workbook_path = PROCESADOS_AUDITORIA_DIR / excel_name.replace(
-                "inventario_", "auditoria_ocupacion_"
-            )
+            output_targets = build_output_targets(file_date)
 
             if force:
-                cleanup = purge_reprocess_outputs(
-                    fecha_corte=file_date,
-                    excel_output_path=excel_output_path,
-                    audit_workbook_path=audit_workbook_path,
-                    fact_partitioned_dir=FACT_PARTITIONED_DIR,
-                    audit_partitioned_dir=AUDIT_PARTITIONED_DIR,
+                control_df, output_targets = apply_force_cleanup(
+                    logger=logger,
+                    control_df=control_df,
+                    filename=filename,
+                    file_date=file_date,
+                    output_targets=output_targets,
                 )
-                control_df = remove_control_records(control_df, filename, file_date)
-                log_force_cleanup(logger, filename, file_date, cleanup)
-                if cleanup.get("excel_locked"):
-                    excel_output_path = build_locked_fallback_output_path(excel_output_path)
-                    logger.warning(
-                        "[FORCE_CLEANUP] %s | se usara una salida alterna para el Excel limpio: %s",
-                        filename,
-                        excel_output_path.name,
-                    )
-                if cleanup.get("audit_workbook_locked"):
-                    audit_workbook_path = build_locked_fallback_output_path(audit_workbook_path)
-                    logger.warning(
-                        "[FORCE_CLEANUP] %s | se usara una salida alterna para la auditoria Excel: %s",
-                        filename,
-                        audit_workbook_path.name,
-                    )
 
             valid_nums, nums_message, df_validated = validate_no_negatives(df_raw, filename)
             if nums_message:
                 logger.info(nums_message)
             if not valid_nums:
-                control_df = add_control_record(
+                control_df = handle_blocked_file(
+                    logger=logger,
                     control_df=control_df,
-                    archivo_original=filename,
-                    fecha_archivo=file_date,
+                    dim_ubicacion=dim_ubicacion,
+                    filename=filename,
+                    file_date=file_date,
                     estado="ERROR_NEGATIVOS",
                     observacion="Valores negativos detectados. Corregir Excel original.",
+                    warning_message=f"[BLOQUEADO] {filename}: corrige el Excel original.",
                 )
                 error_count += 1
-                logger.warning(f"[BLOQUEADO] {filename}: corrige el Excel original.")
-                refresh_dimensions_from_partitions(logger, dim_ubicacion)
                 continue
 
             operational_message = summarize_operational_resolution_candidates(df_validated, filename)
@@ -327,24 +473,24 @@ def main() -> None:
             if location_message:
                 logger.info(location_message)
             if not location_ok:
-                control_df = add_control_record(
+                control_df = handle_blocked_file(
+                    logger=logger,
                     control_df=control_df,
-                    archivo_original=filename,
-                    fecha_archivo=file_date,
+                    dim_ubicacion=dim_ubicacion,
+                    filename=filename,
+                    file_date=file_date,
                     estado="ERROR_UBICACION",
                     observacion="Ubicaciones fuera de estructura CAPACITY_CONFIG. Corregir Excel original.",
+                    warning_message=(
+                        f"[BLOQUEADO] {filename}: el ETL no continua a transformacion ni a resolucion de ocupacion "
+                        "porque primero debe respetarse la estructura fisica de ubicaciones del Excel."
+                    ),
                 )
                 error_count += 1
-                logger.warning(
-                    "[BLOQUEADO] %s: el ETL no continua a transformacion ni a resolucion de ocupacion "
-                    "porque primero debe respetarse la estructura fisica de ubicaciones del Excel.",
-                    filename,
-                )
-                refresh_dimensions_from_partitions(logger, dim_ubicacion)
                 continue
 
             df_clean = transform_inventory(df_validated, file_date)
-            save_daily_outputs(df_clean, excel_output_path)
+            save_daily_outputs(df_clean, output_targets.excel_output_path)
 
             fact_resolved, audit_daily, resolution_summary = resolve_location_occupancy(
                 df_clean,
@@ -352,7 +498,17 @@ def main() -> None:
                 valid_ubicacion_keys,
             )
             log_resolution_summary(logger, f"archivo:{filename}", resolution_summary)
-            save_resolution_audit_workbook(fact_resolved, audit_daily, audit_workbook_path)
+            log_location_cases(
+                logger,
+                f"archivo:{filename}",
+                resolution_summary.get("location_cases", []),
+            )
+            save_resolution_audit_workbook(
+                fact_resolved,
+                audit_daily,
+                output_targets.audit_workbook_path,
+                pd.DataFrame(resolution_summary.get("location_cases", [])),
+            )
 
             fact_daily, daily_audit = build_fact_snapshot(fact_resolved, filename, valid_ubicacion_keys)
             log_ubicacion_audit(logger, f"archivo:{filename}", daily_audit)
@@ -371,12 +527,12 @@ def main() -> None:
 
             refresh_dimensions_from_partitions(logger, dim_ubicacion)
 
-            control_df = add_control_record(
-                control_df=control_df,
+            control_df = register_control_status(
+                control_df,
                 archivo_original=filename,
                 fecha_archivo=file_date,
                 estado="PROCESADO",
-                archivo_excel_salida=excel_name,
+                archivo_excel_salida=output_targets.excel_name,
                 archivo_csv_salida="",
                 observacion=(
                     f"OK | fact: {partition_path} | audit: {audit_partition_path} | "
@@ -388,8 +544,8 @@ def main() -> None:
             logger.info(f"[OK] {filename}")
 
         except Exception as e:
-            control_df = add_control_record(
-                control_df=control_df,
+            control_df = register_control_status(
+                control_df,
                 archivo_original=filename,
                 fecha_archivo=file_date,
                 estado="ERROR",

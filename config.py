@@ -34,6 +34,8 @@ DIM_CLIENTE_FILE = DW_DIR / "dim_cliente.parquet"
 DIM_PRODUCTO_FILE = DW_DIR / "dim_producto.parquet"
 DIM_FECHA_FILE = DW_DIR / "dim_fecha.parquet"
 DIM_UBICACION_FILE = DW_DIR / "dim_ubicacion.parquet"
+FACT_ACTUAL_FILE = DW_DIR / "fact_inventario_actual.parquet"
+SNAPSHOT_CONTROL_FILE = DW_DIR / "fact_snapshot_control.parquet"
 
 LOG_FILE = LOGS_DIR / "etl.log"
 
@@ -90,7 +92,13 @@ OCCUPANCY_RULES = {
     "default_max_logical_pallets_per_location": 2,
     "allow_mixed_products_within_location": False,
     "location_capacity_strategy": "min",
+    "same_presentation_merge_max_gap_days": 45,
 }
+
+# Modo estricto: las ubicaciones internas fuera de la estructura fisica
+# esperada bloquean el ETL y no se contabilizan como posiciones validas.
+BLOCK_ON_INVALID_LOCATION_STRUCTURE = True
+ALLOW_INVALID_LOCATION_AS_POSITION = False
 
 PALLET_IDENTITY_FIELDS = [
     "CLIENTE",
@@ -98,6 +106,8 @@ PALLET_IDENTITY_FIELDS = [
     "PRODUCTO",
     "PRESENTACION",
     "ESTADO PRODUCTO",
+    "LOTE",
+    "FECHA FABRICACION",
 ]
 
 DEFAULT_BOX_CAPACITY_RULES = [

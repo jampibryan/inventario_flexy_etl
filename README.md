@@ -7,6 +7,8 @@ Pipeline ETL en Python para procesar reportes Excel del WMS Flexy y generar un D
 El proyecto transforma snapshots diarios de inventario en un modelo tipo estrella:
 
 - `fact_inventario/` como tabla de hechos particionada por `fecha_corte`
+- `fact_inventario_actual.parquet` como vista del ultimo snapshot disponible
+- `fact_snapshot_control.parquet` como resumen historico por fecha de corte
 - `dim_cliente.parquet`
 - `dim_producto.parquet`
 - `dim_fecha.parquet`
@@ -20,6 +22,8 @@ resuelto por ubicacion fisica.
 
 - Solo se reescribe la particion del dia procesado.
 - El historico queda acumulado por fecha de corte.
+- Se genera una vista `actual` para dashboards que solo quieren el ultimo dia.
+- Se genera una tabla de control por snapshot para auditar el historico.
 - Power BI consume parquet, no Excels crudos.
 - La capacidad estructural se controla desde `dim_ubicacion`.
 - La integridad entre fact y dim de ubicacion queda validada automaticamente.
@@ -32,6 +36,8 @@ Excel Flexy
   -> Python ETL (main.py)
   -> PROCESADOS/Excel/
   -> DW/fact_inventario/fecha_corte=YYYY-MM-DD/data.parquet
+  -> DW/fact_inventario_actual.parquet
+  -> DW/fact_snapshot_control.parquet
   -> DW/dim_*.parquet
   -> Power BI
 ```
@@ -125,7 +131,7 @@ Flujo diario:
 10. Validar integridad de ubicaciones antes de cargar.
 11. Escribir la particion diaria parquet.
 12. Sanear particiones historicas si tienen ubicaciones invalidas.
-13. Regenerar dimensiones.
+13. Regenerar dimensiones y tablas auxiliares del historico.
 14. Registrar el resultado en `control_procesados.csv`.
 
 ## Transformaciones principales
@@ -184,6 +190,28 @@ Campos tecnicos principales:
 - `source_row_num`
 - `source_row_nums`
 - `snapshot_row_id`
+
+## Historico y tablas auxiliares
+
+El ETL mantiene tres capas utiles para Power BI:
+
+- `DW/fact_inventario/fecha_corte=YYYY-MM-DD/data.parquet`
+  Snapshot historico por fecha.
+- `DW/fact_inventario_actual.parquet`
+  Solo el ultimo snapshot disponible.
+- `DW/fact_snapshot_control.parquet`
+  Resumen por fecha con metricas y validaciones del historico.
+
+`fact_snapshot_control.parquet` incluye, entre otros:
+
+- `fecha_corte`
+- `fact_rows`
+- `pallets_logicos`
+- `ubicaciones_ocupadas`
+- `toneladas_total`
+- `audit_rows`
+- `partition_integrity_ok`
+- `es_ultimo_snapshot_flag`
 
 ## Auditoria de ocupacion
 
@@ -301,7 +329,7 @@ Mensajes esperados en log:
 |---|---|
 | `dim_cliente.parquet` | Clientes unicos |
 | `dim_producto.parquet` | Codigo, producto, variedad, clasificacion, calidad, tipo_corte, presentacion, max_cajas_configuradas, regla_capacidad |
-| `dim_fecha.parquet` | Fecha, anio, mes, trimestre, semana y dia |
+| `dim_fecha.parquet` | Calendario continuo entre la fecha minima y maxima del historico, con flags de snapshot |
 | `dim_ubicacion.parquet` | Posiciones estructurales configuradas |
 
 ## Integracion con Power BI
@@ -311,6 +339,8 @@ Power BI debe conectarse a:
 ```text
 DW/
 |-- fact_inventario/
+|-- fact_inventario_actual.parquet
+|-- fact_snapshot_control.parquet
 |-- dim_cliente.parquet
 |-- dim_producto.parquet
 |-- dim_fecha.parquet
@@ -325,6 +355,8 @@ Analisis habilitados:
 - ubicaciones con conflicto usando `distinctcount(ubicacion_key)` filtrando `conflicto_flag = 1`
 - capacidad vs ocupacion
 - historico por fecha de corte
+- ultimo snapshot sin necesidad de medida especial
+- control del historico para validar que cada fecha sea un snapshot limpio
 - inventario por producto, cliente o almacen
 
 ## Validaciones generales

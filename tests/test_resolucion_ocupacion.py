@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 
 import pandas as pd
 
@@ -43,8 +43,8 @@ class ResolucionOcupacionTests(unittest.TestCase):
     def test_consolida_mismo_producto_en_un_pallet_logico(self) -> None:
         df = pd.DataFrame(
             [
-                _base_row(CANTIDAD_CAJAS=76, **{"CANTIDAD CAJAS": 76, "_SOURCE_ROW_NUM": 2}),
-                _base_row(CANTIDAD_CAJAS=24, **{"CANTIDAD CAJAS": 24, "_SOURCE_ROW_NUM": 3, "LOTE": "L2", "FECHA FABRICACIÓN": "2026-03-02"}),
+                _base_row(**{"CANTIDAD CAJAS": 76, "_SOURCE_ROW_NUM": 2}),
+                _base_row(**{"CANTIDAD CAJAS": 24, "_SOURCE_ROW_NUM": 3}),
             ]
         )
 
@@ -55,6 +55,35 @@ class ResolucionOcupacionTests(unittest.TestCase):
         self.assertEqual(int(clean_df.iloc[0]["CANTIDAD CAJAS"]), 100)
         self.assertEqual(clean_df.iloc[0]["tipo_registro_resuelto"], "PALLET_LOGICO_CONSOLIDADO")
         self.assertEqual(len(audit_df), 2)
+
+    def test_misma_presentacion_y_fechas_cercanas_se_trata_como_un_pallet(self) -> None:
+        df = pd.DataFrame(
+            [
+                _base_row(**{"POSICIÓN": 6, "CÓDIGO": "PT-MGO-049", "CANTIDAD CAJAS": 69, "_SOURCE_ROW_NUM": 11, "LOTE": "030126", "FECHA FABRICACIÓN": "2026-02-03", "PRESENTACIÓN": "MANGO KENT DEFORME IQF 20X20 MM A GRANEL CJ X 10KG"}),
+                _base_row(**{"POSICIÓN": 6, "CÓDIGO": "PT-MGO-049", "CANTIDAD CAJAS": 51, "_SOURCE_ROW_NUM": 12, "LOTE": "03026", "FECHA FABRICACIÓN": "2026-01-30", "PRESENTACIÓN": "MANGO KENT DEFORME IQF 20X20 MM A GRANEL CJ X 10KG"}),
+            ]
+        )
+
+        clean_df, _, summary = resolve_location_occupancy(df, "demo.xlsx", self.valid_keys)
+
+        self.assertEqual(summary["logical_pallets"], 1)
+        self.assertEqual(summary["consolidated_pallets"], 1)
+        self.assertEqual(int(clean_df.iloc[0]["CANTIDAD CAJAS"]), 120)
+        self.assertEqual(clean_df.iloc[0]["tipo_registro_resuelto"], "PALLET_REINGRESO_CONSOLIDADO")
+
+    def test_misma_presentacion_con_fechas_lejanas_conserva_solo_el_mas_actual(self) -> None:
+        df = pd.DataFrame(
+            [
+                _base_row(**{"POSICIÓN": 7, "CÓDIGO": "PT-MGO-049", "CANTIDAD CAJAS": 50, "_SOURCE_ROW_NUM": 13, "LOTE": "L2025", "FECHA FABRICACIÓN": "2025-02-03", "PRESENTACIÓN": "MANGO KENT DEFORME IQF 20X20 MM A GRANEL CJ X 10KG"}),
+                _base_row(**{"POSICIÓN": 7, "CÓDIGO": "PT-MGO-049", "CANTIDAD CAJAS": 40, "_SOURCE_ROW_NUM": 14, "LOTE": "L2026", "FECHA FABRICACIÓN": "2026-01-30", "PRESENTACIÓN": "MANGO KENT DEFORME IQF 20X20 MM A GRANEL CJ X 10KG"}),
+            ]
+        )
+
+        clean_df, audit_df, summary = resolve_location_occupancy(df, "demo.xlsx", self.valid_keys)
+
+        self.assertEqual(summary["logical_pallets"], 1)
+        self.assertEqual(clean_df.iloc[0]["LOTE"], "L2026")
+        self.assertIn("DESCARTADO_CONFLICTO", audit_df["tipo_registro_resuelto"].tolist())
 
     def test_multipallet_valido_con_regla_explicita(self) -> None:
         df = pd.DataFrame(
@@ -72,7 +101,7 @@ class ResolucionOcupacionTests(unittest.TestCase):
         self.assertEqual(clean_df["regla_compatibilidad_ubicacion"].nunique(), 1)
         self.assertEqual(clean_df["regla_compatibilidad_ubicacion"].iloc[0], "SMALL_PALLETS_GENERIC")
 
-    def test_conflicto_si_no_hay_regla_compatible(self) -> None:
+    def test_coexistencia_valida_si_no_excede_capacidad(self) -> None:
         df = pd.DataFrame(
             [
                 _base_row(**{"POSICIÓN": 3, "CÓDIGO": "B", "PRODUCTO": "PALTA", "PRESENTACIÓN": "4 KG", "CANTIDAD CAJAS": 70, "_SOURCE_ROW_NUM": 6, "FECHA FABRICACIÓN": "2026-03-10"}),
@@ -82,17 +111,31 @@ class ResolucionOcupacionTests(unittest.TestCase):
 
         clean_df, audit_df, summary = resolve_location_occupancy(df, "demo.xlsx", self.valid_keys)
 
+        self.assertEqual(summary["logical_pallets"], 2)
+        self.assertEqual(summary["multipallet_locations"], 1)
+        self.assertTrue((clean_df["tipo_registro_resuelto"] == "MULTIPALLET_VALIDO").all())
+        self.assertIn("CAPACIDAD_UBICACION", audit_df["regla_compatibilidad_ubicacion"].tolist())
+
+    def test_si_excede_capacidad_se_conserva_el_mas_reciente(self) -> None:
+        df = pd.DataFrame(
+            [
+                _base_row(**{"POSICIÓN": 4, "CÓDIGO": "B", "PRODUCTO": "PALTA", "PRESENTACIÓN": "4 KG", "CANTIDAD CAJAS": 80, "_SOURCE_ROW_NUM": 8, "FECHA FABRICACIÓN": "2026-03-10"}),
+                _base_row(**{"POSICIÓN": 4, "CÓDIGO": "C", "PRODUCTO": "FRESA", "PRESENTACIÓN": "2 KG", "CANTIDAD CAJAS": 70, "_SOURCE_ROW_NUM": 9, "FECHA FABRICACIÓN": "2026-03-11"}),
+            ]
+        )
+
+        clean_df, audit_df, summary = resolve_location_occupancy(df, "demo.xlsx", self.valid_keys)
+
         self.assertEqual(summary["logical_pallets"], 1)
         self.assertEqual(summary["conflict_locations"], 1)
         self.assertEqual(clean_df.iloc[0]["tipo_registro_resuelto"], "CONFLICTO_RESUELTO_MAS_RECIENTE")
-        self.assertIn("SIN_REGLA_COMPATIBILIDAD", audit_df["regla_compatibilidad_ubicacion"].tolist())
+        self.assertEqual(clean_df.iloc[0]["CÓDIGO"], "C")
         self.assertIn("DESCARTADO_CONFLICTO", audit_df["tipo_registro_resuelto"].tolist())
 
-    def test_sobrecapacidad_sale_de_fact_limpia(self) -> None:
+    def test_sobrecapacidad_unitaria_sale_de_fact_limpia(self) -> None:
         df = pd.DataFrame(
             [
-                _base_row(**{"POSICIÓN": 4, "CÓDIGO": "B", "PRODUCTO": "PALTA", "PRESENTACIÓN": "4 KG", "CANTIDAD CAJAS": 80, "_SOURCE_ROW_NUM": 8}),
-                _base_row(**{"POSICIÓN": 4, "CÓDIGO": "C", "PRODUCTO": "FRESA", "PRESENTACIÓN": "2 KG", "CANTIDAD CAJAS": 70, "_SOURCE_ROW_NUM": 9}),
+                _base_row(**{"POSICIÓN": 5, "CÓDIGO": "B", "PRODUCTO": "PALTA", "PRESENTACIÓN": "4 KG", "CANTIDAD CAJAS": 130, "_SOURCE_ROW_NUM": 10}),
             ]
         )
 

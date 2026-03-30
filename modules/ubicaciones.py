@@ -4,7 +4,7 @@ from typing import Any
 
 import pandas as pd
 
-from config import CONTROLLED_INTERNAL_WAREHOUSES
+from config import ALLOW_INVALID_LOCATION_AS_POSITION, CONTROLLED_INTERNAL_WAREHOUSES
 
 
 CAMARA_PREFIX = "C\u00c1MARA"
@@ -13,15 +13,22 @@ POSICION_LABEL = "POSICI\u00d3N"
 SIN_UBICACION_LABEL = "SIN_UBICACI\u00d3N"
 EXTERNO_LABEL = "EXTERNO"
 
-AUDIT_COLUMNS = [
-    "source_file",
-    "source_row_num",
-    "ALMAC\u00c9N",
-    "C\u00c1MARA",
-    "RACK",
-    "NIVEL",
-    "POSICI\u00d3N",
-]
+COLUMN_ALIASES = {
+    "almacen": ("ALMACEN", "ALMACÉN", "ALMACÃ‰N"),
+    "almacen_original": ("ALMACEN ORIGINAL", "ALMACÉN ORIGINAL", "ALMACÃ‰N ORIGINAL"),
+    "camara": ("CAMARA", "CÁMARA", "CÃMARA"),
+    "rack": ("RACK",),
+    "nivel": ("NIVEL",),
+    "posicion": ("POSICION", "POSICIÓN", "POSICIÃ“N"),
+}
+
+AUDIT_COLUMN_LABELS = {
+    "almacen": "ALMACEN",
+    "camara": "CAMARA",
+    "rack": "RACK",
+    "nivel": "NIVEL",
+    "posicion": "POSICION",
+}
 
 
 def normalize_text(value: Any) -> str:
@@ -30,12 +37,48 @@ def normalize_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value)).strip().upper()
 
 
-CONTROLLED_INTERNAL_WAREHOUSE_SET = {normalize_text(value) for value in CONTROLLED_INTERNAL_WAREHOUSES}
+CONTROLLED_INTERNAL_WAREHOUSE_SET = {
+    normalize_text(value) for value in (*CONTROLLED_INTERNAL_WAREHOUSES, "CHAVIN")
+}
 
 
 def strip_accents(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _row_get(row: pd.Series, alias_group: str) -> Any:
+    for alias in COLUMN_ALIASES[alias_group]:
+        if alias in row.index:
+            return row.get(alias)
+    return None
+
+
+def _select_existing_column(df: pd.DataFrame, alias_group: str) -> str | None:
+    for alias in COLUMN_ALIASES[alias_group]:
+        if alias in df.columns:
+            return alias
+    return None
+
+
+def _build_invalid_rows_audit_view(invalid_rows: pd.DataFrame) -> pd.DataFrame:
+    selected_columns: list[str] = ["source_file", "source_row_num"]
+    rename_map: dict[str, str] = {}
+
+    for alias_group, label in AUDIT_COLUMN_LABELS.items():
+        column = _select_existing_column(invalid_rows, alias_group)
+        if column:
+            selected_columns.append(column)
+            rename_map[column] = label
+
+    selected_columns.extend(
+        [
+            "camara_normalizada",
+            "ubicacion_key_candidata",
+            "contabilizada_temporalmente_flag",
+        ]
+    )
+    return invalid_rows[selected_columns].rename(columns=rename_map)
 
 
 def normalize_camara(value: Any) -> str:
@@ -97,7 +140,7 @@ def build_ubicacion_key(
 
 
 def resolve_almacen_control_reference(row: pd.Series) -> Any:
-    return row.get("ALMACÉN ORIGINAL", row.get("ALMACÉN"))
+    return _row_get(row, "almacen_original") or _row_get(row, "almacen")
 
 
 def resolve_ubicacion_inventario(
@@ -114,6 +157,8 @@ def resolve_ubicacion_inventario(
     if camara_norm == RECEPCION_LABEL:
         return RECEPCION_LABEL
     if pd.notna(ubicacion_key) and str(ubicacion_key) in valid_ubicacion_keys:
+        return camara_norm
+    if ALLOW_INVALID_LOCATION_AS_POSITION and pd.notna(ubicacion_key):
         return camara_norm
     return None
 
@@ -133,6 +178,8 @@ def resolve_tipo_ubicacion(
         return RECEPCION_LABEL
     if pd.notna(ubicacion_key) and str(ubicacion_key) in valid_ubicacion_keys:
         return POSICION_LABEL
+    if ALLOW_INVALID_LOCATION_AS_POSITION and pd.notna(ubicacion_key):
+        return POSICION_LABEL
     return SIN_UBICACION_LABEL
 
 
@@ -144,20 +191,24 @@ def sanitize_fact_ubicaciones(
 
     ubicacion_key_candidata = fact.apply(
         lambda row: build_ubicacion_key(
-            row.get("C\u00c1MARA"),
-            row.get("RACK"),
-            row.get("NIVEL"),
-            row.get("POSICI\u00d3N"),
+            _row_get(row, "camara"),
+            _row_get(row, "rack"),
+            _row_get(row, "nivel"),
+            _row_get(row, "posicion"),
         ),
         axis=1,
     )
 
     es_match_dim = ubicacion_key_candidata.isin(valid_ubicacion_keys)
-    fact["ubicacion_key"] = ubicacion_key_candidata.where(es_match_dim, pd.NA).astype("string")
+    if ALLOW_INVALID_LOCATION_AS_POSITION:
+        fact["ubicacion_key"] = ubicacion_key_candidata.astype("string")
+    else:
+        fact["ubicacion_key"] = ubicacion_key_candidata.where(es_match_dim, pd.NA).astype("string")
+
     fact["ubicacion_inventario"] = fact.apply(
         lambda row: resolve_ubicacion_inventario(
             resolve_almacen_control_reference(row),
-            row.get("C\u00c1MARA"),
+            _row_get(row, "camara"),
             row.get("ubicacion_key"),
             valid_ubicacion_keys,
         ),
@@ -166,7 +217,7 @@ def sanitize_fact_ubicaciones(
     fact["tipo_ubicacion"] = fact.apply(
         lambda row: resolve_tipo_ubicacion(
             resolve_almacen_control_reference(row),
-            row.get("C\u00c1MARA"),
+            _row_get(row, "camara"),
             row.get("ubicacion_key"),
             valid_ubicacion_keys,
         ),
@@ -178,15 +229,22 @@ def sanitize_fact_ubicaciones(
         axis=1,
     )
     invalid_mask = internal_mask & ubicacion_key_candidata.notna() & ~es_match_dim
+
     invalid_rows = fact_df.loc[invalid_mask].copy()
     invalid_rows["ubicacion_key_candidata"] = ubicacion_key_candidata[invalid_mask]
-    invalid_rows["camara_normalizada"] = invalid_rows["C\u00c1MARA"].apply(normalize_camara)
+    invalid_rows["camara_normalizada"] = invalid_rows.apply(
+        lambda row: normalize_camara(_row_get(row, "camara")),
+        axis=1,
+    )
+    invalid_rows["contabilizada_temporalmente_flag"] = 1 if ALLOW_INVALID_LOCATION_AS_POSITION else 0
+    audit_rows = _build_invalid_rows_audit_view(invalid_rows)
 
-    available_audit_columns = [col for col in AUDIT_COLUMNS if col in invalid_rows.columns]
-    audit_rows = invalid_rows[available_audit_columns + ["camara_normalizada", "ubicacion_key_candidata"]]
+    fact["ubicacion_invalida_estructura_flag"] = 0
+    fact.loc[invalid_mask, "ubicacion_invalida_estructura_flag"] = 1
 
     return fact, {
         "invalid_position_count": int(invalid_mask.sum()),
         "invalid_position_keys": sorted(audit_rows["ubicacion_key_candidata"].dropna().unique().tolist()),
         "invalid_rows": audit_rows.reset_index(drop=True),
+        "invalid_positions_preserved": bool(ALLOW_INVALID_LOCATION_AS_POSITION),
     }
