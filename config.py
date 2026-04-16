@@ -1,4 +1,4 @@
-import csv
+﻿import csv
 import os
 from pathlib import Path
 
@@ -6,7 +6,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CATALOGOS_DIR = BASE_DIR / "catalogos"
 
 DEFAULT_REPORTE_DIR = Path(
-    r"G:\Unidades compartidas\Departamento de TI\04. Proyectos\12. Dashboard Flexy\Power BI\Reporte"
+    r"G:\Unidades compartidas\Departamento de TI\04. Proyectos\14. Repertorio\01. PPTT\02. Reporte"
 )
 REPORTE_DIR = Path(os.getenv("FLEXY_REPORTE_DIR", str(DEFAULT_REPORTE_DIR)))
 
@@ -250,3 +250,7 @@ def _load_multipallet_compatibility_rules() -> list[dict[str, object]]:
 
 BOX_CAPACITY_RULES = _load_box_capacity_rules()
 MULTIPALLET_COMPATIBILITY_RULES = _load_multipallet_compatibility_rules()
+
+
+
+

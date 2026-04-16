@@ -10,7 +10,12 @@ from config import (
     CONTROLLED_INTERNAL_WAREHOUSES,
     EXPECTED_COLUMNS,
 )
-from modules.dimensiones import CAPACITY_CONFIG
+from modules.dimensiones import (
+    CAPACITY_CONFIG,
+    get_camera_capacity_limits,
+    resolve_camera_section,
+)
+from modules.fechas import parse_datetime_series
 from modules.ubicaciones import (
     CONTROLLED_INTERNAL_WAREHOUSE_SET,
     RECEPCION_LABEL,
@@ -118,7 +123,7 @@ def extract_date_from_data(df: pd.DataFrame) -> tuple[bool, str, str]:
     if "Fecha Actualizaci\u00f3n" not in df.columns:
         return False, "", "No se encontro la columna 'Fecha Actualizacion'"
 
-    fechas = pd.to_datetime(df["Fecha Actualizaci\u00f3n"], errors="coerce").dropna()
+    fechas = parse_datetime_series(df["Fecha Actualizaci\u00f3n"]).dropna()
 
     if fechas.empty:
         return False, "", "No se encontraron fechas validas en 'Fecha Actualizacion'"
@@ -562,13 +567,24 @@ def validate_location_structure(df: pd.DataFrame, filename: str) -> tuple[bool, 
             continue
 
         cfg = CAPACITY_LOOKUP[camara]
-        ranges = [
-            ("rack", int(rack), 1, int(cfg["racks"])),
-            ("nivel", int(nivel), 1, int(cfg["niveles"])),
-            ("posicion", int(posicion), 1, int(cfg["posiciones"])),
+        section = resolve_camera_section(cfg, int(rack))
+
+        if section is None:
+            limits = get_camera_capacity_limits(cfg)
+            issues.append(
+                _format_location_issue(
+                    row,
+                    f"rack fuera de rango para {camara}: permitido {limits['rack_min']}..{limits['rack_max']}",
+                )
+            )
+            continue
+
+        section_ranges = [
+            ("nivel", int(nivel), 1, int(section["niveles"])),
+            ("posicion", int(posicion), 1, int(section["posiciones"])),
         ]
 
-        for label, value, min_value, max_value in ranges:
+        for label, value, min_value, max_value in section_ranges:
             if value < min_value or value > max_value:
                 issues.append(
                     _format_location_issue(

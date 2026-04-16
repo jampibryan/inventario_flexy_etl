@@ -1,6 +1,7 @@
 import pandas as pd
 
 from config import FINAL_COLUMNS
+from modules.fechas import parse_datetime_series
 from modules.productos import (
     clasificar_almacen,
     clasificar_clasificacion,
@@ -67,9 +68,9 @@ def _build_output_columns(df: pd.DataFrame) -> list[str]:
 def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
     df = df.copy()
 
-    df["Fecha Actualizaci\u00f3n"] = pd.to_datetime(df["Fecha Actualizaci\u00f3n"], errors="coerce")
-    df["Fecha Caducidad"] = pd.to_datetime(df["Fecha Caducidad"], dayfirst=True, errors="coerce").dt.date
-    df["Fecha Fabricaci\u00f3n"] = pd.to_datetime(df["Fecha Fabricaci\u00f3n"], dayfirst=True, errors="coerce").dt.date
+    df["Fecha Actualizaci\u00f3n"] = parse_datetime_series(df["Fecha Actualizaci\u00f3n"])
+    df["Fecha Caducidad"] = parse_datetime_series(df["Fecha Caducidad"]).dt.date
+    df["Fecha Fabricaci\u00f3n"] = parse_datetime_series(df["Fecha Fabricaci\u00f3n"]).dt.date
 
     _normalize_text_columns(df)
     _normalize_numeric_columns(df)

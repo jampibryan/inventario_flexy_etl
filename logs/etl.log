@@ -1,0 +1,48 @@
+2026-04-15 18:32:09,017 | INFO | === INICIO ETL INVENTARIO FLEXY ===
+2026-04-15 18:32:09,021 | INFO | [CONFIG_OCUPACION] identidad_pallet=CLIENTE,CODIGO,PRODUCTO,PRESENTACION,ESTADO PRODUCTO,LOTE,FECHA FABRICACION | reglas_capacidad=7 | reglas_multipallet=1
+2026-04-15 18:32:09,806 | INFO | [DIM_UBICACION][dataframe_pre_export] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 18:32:10,457 | INFO | [DIM_UBICACION][parquet_exportado] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 18:32:10,458 | INFO | [SNAPSHOTS] fechas=0 | integridad_ok=0 | integridad_error=0 | ultimo_snapshot=0
+2026-04-15 18:32:10,464 | INFO | No se encontraron archivos Excel en la carpeta ORIGINAL.
+2026-04-15 19:25:31,559 | INFO | === INICIO ETL INVENTARIO FLEXY ===
+2026-04-15 19:25:31,562 | INFO | [CONFIG_OCUPACION] identidad_pallet=CLIENTE,CODIGO,PRODUCTO,PRESENTACION,ESTADO PRODUCTO,LOTE,FECHA FABRICACION | reglas_capacidad=7 | reglas_multipallet=1
+2026-04-15 19:25:32,012 | INFO | [DIM_UBICACION][dataframe_pre_export] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:25:32,188 | INFO | [DIM_UBICACION][parquet_exportado] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:25:32,189 | INFO | [SNAPSHOTS] fechas=0 | integridad_ok=0 | integridad_error=0 | ultimo_snapshot=0
+2026-04-15 19:25:32,194 | INFO | No se encontraron archivos Excel en la carpeta ORIGINAL.
+2026-04-15 19:26:35,832 | INFO | === INICIO ETL INVENTARIO FLEXY ===
+2026-04-15 19:26:35,835 | INFO | [CONFIG_OCUPACION] identidad_pallet=CLIENTE,CODIGO,PRODUCTO,PRESENTACION,ESTADO PRODUCTO,LOTE,FECHA FABRICACION | reglas_capacidad=7 | reglas_multipallet=1
+2026-04-15 19:26:36,154 | INFO | [DIM_UBICACION][dataframe_pre_export] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:26:36,266 | INFO | [DIM_UBICACION][parquet_exportado] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:26:36,266 | INFO | [SNAPSHOTS] fechas=0 | integridad_ok=0 | integridad_error=0 | ultimo_snapshot=0
+2026-04-15 19:26:36,271 | INFO | No se encontraron archivos Excel en la carpeta ORIGINAL.
+2026-04-15 19:26:42,710 | INFO | === INICIO ETL INVENTARIO FLEXY ===
+2026-04-15 19:26:42,712 | INFO | [CONFIG_OCUPACION] identidad_pallet=CLIENTE,CODIGO,PRODUCTO,PRESENTACION,ESTADO PRODUCTO,LOTE,FECHA FABRICACION | reglas_capacidad=7 | reglas_multipallet=1
+2026-04-15 19:26:43,143 | INFO | [DIM_UBICACION][dataframe_pre_export] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:26:43,411 | INFO | [DIM_UBICACION][parquet_exportado] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:26:43,412 | INFO | [SNAPSHOTS] fechas=0 | integridad_ok=0 | integridad_error=0 | ultimo_snapshot=0
+2026-04-15 19:26:43,421 | INFO | No se encontraron archivos Excel en la carpeta ORIGINAL.
+2026-04-15 19:27:53,963 | INFO | === INICIO ETL INVENTARIO FLEXY ===
+2026-04-15 19:27:53,965 | INFO | [CONFIG_OCUPACION] identidad_pallet=CLIENTE,CODIGO,PRODUCTO,PRESENTACION,ESTADO PRODUCTO,LOTE,FECHA FABRICACION | reglas_capacidad=7 | reglas_multipallet=1
+2026-04-15 19:27:54,282 | INFO | [DIM_UBICACION][dataframe_pre_export] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:27:54,393 | INFO | [DIM_UBICACION][parquet_exportado] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:27:54,394 | INFO | [SNAPSHOTS] fechas=0 | integridad_ok=0 | integridad_error=0 | ultimo_snapshot=0
+2026-04-15 19:27:54,399 | INFO | No se encontraron archivos Excel en la carpeta ORIGINAL.
+2026-04-15 19:28:04,647 | INFO | === INICIO ETL INVENTARIO FLEXY ===
+2026-04-15 19:28:04,650 | INFO | [CONFIG_OCUPACION] identidad_pallet=CLIENTE,CODIGO,PRODUCTO,PRESENTACION,ESTADO PRODUCTO,LOTE,FECHA FABRICACION | reglas_capacidad=7 | reglas_multipallet=1
+2026-04-15 19:28:04,988 | INFO | [DIM_UBICACION][dataframe_pre_export] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:28:05,100 | INFO | [DIM_UBICACION][parquet_exportado] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:28:05,100 | INFO | [SNAPSHOTS] fechas=0 | integridad_ok=0 | integridad_error=0 | ultimo_snapshot=0
+2026-04-15 19:28:05,106 | INFO | No se encontraron archivos Excel en la carpeta ORIGINAL.
+2026-04-15 19:28:11,910 | INFO | === INICIO ETL INVENTARIO FLEXY ===
+2026-04-15 19:28:11,915 | INFO | [CONFIG_OCUPACION] identidad_pallet=CLIENTE,CODIGO,PRODUCTO,PRESENTACION,ESTADO PRODUCTO,LOTE,FECHA FABRICACION | reglas_capacidad=7 | reglas_multipallet=1
+2026-04-15 19:28:12,250 | INFO | [DIM_UBICACION][dataframe_pre_export] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:28:12,362 | INFO | [DIM_UBICACION][parquet_exportado] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-15 19:28:12,363 | INFO | [SNAPSHOTS] fechas=0 | integridad_ok=0 | integridad_error=0 | ultimo_snapshot=0
+2026-04-15 19:28:12,367 | INFO | No se encontraron archivos Excel en la carpeta ORIGINAL.
+2026-04-16 08:51:52,374 | INFO | === INICIO ETL INVENTARIO FLEXY ===
+2026-04-16 08:51:52,380 | INFO | [CONFIG_OCUPACION] identidad_pallet=CLIENTE,CODIGO,PRODUCTO,PRESENTACION,ESTADO PRODUCTO,LOTE,FECHA FABRICACION | reglas_capacidad=7 | reglas_multipallet=1
+2026-04-16 08:51:52,834 | INFO | [DIM_UBICACION][dataframe_pre_export] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-16 08:51:53,085 | INFO | [DIM_UBICACION][parquet_exportado] camaras=4 | estructural=1659 | operativa=1593 | no_operativa=66
+2026-04-16 08:51:53,086 | INFO | [SNAPSHOTS] fechas=0 | integridad_ok=0 | integridad_error=0 | ultimo_snapshot=0
+2026-04-16 08:51:53,091 | INFO | No se encontraron archivos Excel en la carpeta ORIGINAL.

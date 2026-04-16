@@ -45,16 +45,84 @@ CAPACITY_CONFIG = [
     },
     {
         "camara": "C\u00c1MARA 04",
-        "racks": 13,
-        "niveles": 11,
-        "posiciones": 3,
+        "sections": [
+            {
+                "rack_inicio": 1,
+                "rack_fin": 13,
+                "niveles": 3,
+                "posiciones": 6,
+            },
+            {
+                "rack_inicio": 14,
+                "rack_fin": 26,
+                "niveles": 3,
+                "posiciones": 5,
+            },
+        ],
         "camara_orden": 4,
         "es_operativa": 1,
         "es_estructural": 1,
         "capacidad_operativa_real": 429,
-        "capacidad_operativa_mode": "MANUAL_TEMPORAL",
+        "capacidad_operativa_mode": "FULL_STRUCTURE",
     },
 ]
+
+
+def get_camera_structural_sections(cfg: dict[str, object]) -> list[dict[str, int]]:
+    raw_sections = cfg.get("sections")
+    if raw_sections:
+        sections: list[dict[str, int]] = []
+        for section in raw_sections:
+            sections.append(
+                {
+                    "rack_inicio": int(section["rack_inicio"]),
+                    "rack_fin": int(section["rack_fin"]),
+                    "niveles": int(section["niveles"]),
+                    "posiciones": int(section["posiciones"]),
+                }
+            )
+        return sections
+
+    return [
+        {
+            "rack_inicio": 1,
+            "rack_fin": int(cfg["racks"]),
+            "niveles": int(cfg["niveles"]),
+            "posiciones": int(cfg["posiciones"]),
+        }
+    ]
+
+
+def resolve_camera_section(cfg: dict[str, object], rack: int | None) -> dict[str, int] | None:
+    if rack is None:
+        return None
+
+    for section in get_camera_structural_sections(cfg):
+        if section["rack_inicio"] <= int(rack) <= section["rack_fin"]:
+            return section
+
+    return None
+
+
+def get_camera_capacity_limits(cfg: dict[str, object]) -> dict[str, int]:
+    sections = get_camera_structural_sections(cfg)
+    rack_min = min(section["rack_inicio"] for section in sections)
+    rack_max = max(section["rack_fin"] for section in sections)
+    nivel_max = max(section["niveles"] for section in sections)
+    posicion_max = max(section["posiciones"] for section in sections)
+    capacidad_estructural = sum(
+        (section["rack_fin"] - section["rack_inicio"] + 1)
+        * section["niveles"]
+        * section["posiciones"]
+        for section in sections
+    )
+    return {
+        "rack_min": rack_min,
+        "rack_max": rack_max,
+        "nivel_max": nivel_max,
+        "posicion_max": posicion_max,
+        "capacidad_estructural": capacidad_estructural,
+    }
 
 
 def _canonicalize_product_fact_columns(fact_df: pd.DataFrame) -> pd.DataFrame:
@@ -221,34 +289,36 @@ def build_dim_ubicacion() -> pd.DataFrame:
     rows = []
 
     for cfg in CAPACITY_CONFIG:
-        capacidad_estructural = int(cfg["racks"]) * int(cfg["niveles"]) * int(cfg["posiciones"])
+        sections = get_camera_structural_sections(cfg)
+        capacidad_estructural = get_camera_capacity_limits(cfg)["capacidad_estructural"]
         capacidad_operativa_real = int(cfg.get("capacidad_operativa_real", capacidad_estructural))
         capacidad_operativa_real = max(0, min(capacidad_operativa_real, capacidad_estructural))
         mode = str(cfg.get("capacidad_operativa_mode", "FULL_STRUCTURE"))
         secuencia = 0
 
-        for rack, nivel, posicion in product(
-            range(1, cfg["racks"] + 1),
-            range(1, cfg["niveles"] + 1),
-            range(1, cfg["posiciones"] + 1),
-        ):
-            secuencia += 1
-            rows.append({
-                "ubicacion_key": build_ubicacion_key(cfg["camara"], rack, nivel, posicion),
-                "almacen": "CHAVIN",
-                "camara": cfg["camara"],
-                "rack": rack,
-                "nivel": nivel,
-                "posicion": posicion,
-                "camara_orden": cfg["camara_orden"],
-                "es_operativa": 1 if int(cfg["es_operativa"]) == 1 and secuencia <= capacidad_operativa_real else 0,
-                "es_estructural": cfg["es_estructural"],
-                "capacidad_estructural_camara": capacidad_estructural,
-                "capacidad_operativa_real_camara": capacidad_operativa_real,
-                "capacidad_operativa_mode": mode,
-                "posicion_operativa_temporal_flag": 1 if secuencia <= capacidad_operativa_real else 0,
-                "secuencia_posicion_camara": secuencia,
-            })
+        for section in sections:
+            for rack, nivel, posicion in product(
+                range(section["rack_inicio"], section["rack_fin"] + 1),
+                range(1, section["niveles"] + 1),
+                range(1, section["posiciones"] + 1),
+            ):
+                secuencia += 1
+                rows.append({
+                    "ubicacion_key": build_ubicacion_key(cfg["camara"], rack, nivel, posicion),
+                    "almacen": "CHAVIN",
+                    "camara": cfg["camara"],
+                    "rack": rack,
+                    "nivel": nivel,
+                    "posicion": posicion,
+                    "camara_orden": cfg["camara_orden"],
+                    "es_operativa": 1 if int(cfg["es_operativa"]) == 1 and secuencia <= capacidad_operativa_real else 0,
+                    "es_estructural": cfg["es_estructural"],
+                    "capacidad_estructural_camara": capacidad_estructural,
+                    "capacidad_operativa_real_camara": capacidad_operativa_real,
+                    "capacidad_operativa_mode": mode,
+                    "posicion_operativa_temporal_flag": 1 if secuencia <= capacidad_operativa_real else 0,
+                    "secuencia_posicion_camara": secuencia,
+                })
 
     dim = pd.DataFrame(rows)
     dim["ubicacion_invalida_estructura_flag"] = 0
