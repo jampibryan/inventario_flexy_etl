@@ -2,47 +2,67 @@
 
 Pipeline ETL en Python para procesar reportes Excel del WMS Flexy y generar un Data Warehouse local en Parquet, listo para consumo en Power BI.
 
+---
+
 ## Objetivo
 
 El proyecto transforma snapshots diarios de inventario en un modelo tipo estrella:
 
-- `fact_inventario/` como tabla de hechos particionada por `fecha_corte`
-- `fact_inventario_actual.parquet` como vista del ultimo snapshot disponible
-- `fact_snapshot_control.parquet` como resumen historico por fecha de corte
+- `fact_inventario/` como tabla de hechos particionada por `fecha_corte`.
+- `fact_inventario_actual.parquet` como vista del último snapshot disponible.
+- `fact_snapshot_control.parquet` como resumen histórico por fecha de corte.
 - `dim_cliente.parquet`
 - `dim_producto.parquet`
 - `dim_fecha.parquet`
 - `dim_ubicacion.parquet`
 
-Cada fila del Excel representa 1 registro operativo.
-La tabla final `fact_inventario` ahora queda a nivel de `pallet_logico`,
-resuelto por ubicacion fisica.
+Cada fila del Excel representa 1 registro operativo. La tabla final `fact_inventario` queda a nivel de `pallet_logico`, resuelto por ubicación física.
 
-## Beneficios de la arquitectura
+---
 
-- Solo se reescribe la particion del dia procesado.
-- El historico queda acumulado por fecha de corte.
-- Se genera una vista `actual` para dashboards que solo quieren el ultimo dia.
-- Se genera una tabla de control por snapshot para auditar el historico.
-- Power BI consume parquet, no Excels crudos.
-- La capacidad estructural se controla desde `dim_ubicacion`.
-- La integridad entre fact y dim de ubicacion queda validada automaticamente.
+## Nuevas Características Integradas (Mejoras Recientes)
 
-## Flujo general
+### 1. Integración con Lista Maestra de Productos
+- **Mapeo Automático de SKUs**: El pipeline consume el archivo `LISTA MAESTRA DE PRODUCTOS.xlsx` (pestaña `verificada`) y asocia automáticamente el producto clasificado y el peso exacto (`Peso x UM`).
+- **Manejo de SKUs Nulos (`SIN_SKU`)**: Los registros sin código en el Excel original ya no se eliminan; ahora se etiquetan como `SIN_SKU` y se catalogan como `"PRODUCTO SIN CLASIFICAR"` para no perder peso/tonelaje en Power BI.
+- **Validación Permisiva (Advertencia)**: Si un SKU no está en la Lista Maestra de Productos, el script no se detiene; en su lugar, emite una advertencia en la consola y aplica una clasificación genérica (`OTROS` y peso de `1.0 KG`), manteniendo la continuidad del flujo.
+
+### 2. Extracción y Desfase Temporal de Fechas
+- **Fuente de Fecha Dinámica**: El parámetro `DATE_SOURCE` (en `config.py`) permite elegir si extraer la fecha desde la celda interna (`"content"`) o desde el nombre del archivo (`"filename"`), dando soporte a formatos `DD-MM-YYYY` y `YYYY-MM-DD`.
+- **Desfase de Corte**: El parámetro `DATE_SHIFT_DAYS` aplica un desfase (ej. `-1` día) para corregir la fecha operativa real, ya que el reporte descargado "hoy" representa el inventario al cierre del día anterior.
+
+### 3. Formato y Presentación de Excels Limpios
+- **Nueva Estructura de Nombres**: Los archivos Excel generados comienzan con la fecha para facilitar la ordenación:
+  - Excel Limpio: `DD-MM-YYYY_inventario.xlsx` (ej. `15-06-2026_inventario.xlsx`).
+  - Auditoría: `DD-MM-YYYY_auditoria_ocupacion.xlsx` (ej. `15-06-2026_auditoria_ocupacion.xlsx`).
+- **Alineación Centrada**: Todas las columnas del Excel (incluyendo fechas y números) se centran de forma automática.
+- **Sin Columnas Técnicas en Salida Limpia**: La columna técnica de auditoría `_SOURCE_ROW_NUM` se remueve del archivo limpio final para limpieza visual de cara al negocio, y se mantiene únicamente en las hojas de auditoría.
+
+### 4. Reporte Resumen en Consola
+Al terminar la corrida, el ETL imprime un reporte en formato de tabla ASCII con el resumen de la ejecución del pipeline:
+- Nombre del archivo y su fecha de corte calculada.
+- Estado final (`PROCESADO`, `ERROR`).
+- Cantidad de pallets lógicos, consolidaciones aplicadas y SKUs faltantes en catálogo.
+
+---
+
+## Flujo General
 
 ```text
 Excel Flexy
   -> ORIGINAL/
   -> Python ETL (main.py)
-  -> PROCESADOS/Excel/
+  -> PROCESADOS/Excel/ (Limpio centrado: DD-MM-YYYY_inventario.xlsx)
   -> DW/fact_inventario/fecha_corte=YYYY-MM-DD/data.parquet
   -> DW/fact_inventario_actual.parquet
   -> DW/fact_snapshot_control.parquet
   -> DW/dim_*.parquet
-  -> Power BI
+  -> Power BI (Actualización directa)
 ```
 
-## Estructura del proyecto
+---
+
+## Estructura del Proyecto
 
 ```text
 Inventario_Flexy_ETL/
@@ -50,359 +70,71 @@ Inventario_Flexy_ETL/
 |-- config.py
 |-- requirements.txt
 |-- README.md
+|-- .gitignore
 |-- modules/
 |   |-- control.py
 |   |-- dimensiones.py
 |   |-- extract.py
 |   |-- file_manager.py
 |   |-- load.py
+|   |-- master_catalog.py      <-- Carga y lectura del catálogo maestro
 |   |-- parquet_io.py
 |   |-- snapshot.py
 |   |-- transform.py
 |   |-- ubicaciones.py
 |   `-- utils.py
+|-- tests/
+|   |-- test_data_quality_runner.py
+|   |-- test_master_catalog.py  <-- Pruebas de integración del catálogo
+|   `-- test_historico.py
 `-- venv/
 ```
 
-## Responsabilidad de modulos
+---
 
-- `main.py`: orquestacion del pipeline, logging y regeneracion del DW.
-- `modules/extract.py`: lectura de Excel, validacion de columnas y fecha.
-- `modules/transform.py`: limpieza y transformacion del Excel a layout estandar.
-- `modules/snapshot.py`: construccion del fact snapshot y claves tecnicas.
-- `modules/ubicaciones.py`: normalizacion de camara, construccion de `ubicacion_key` y validaciones de integridad.
-- `modules/dimensiones.py`: generacion de dimensiones.
-- `modules/load.py`: escritura de Excel de revision, particiones parquet y saneamiento historico.
-- `modules/control.py`: control de archivos procesados.
-- `modules/parquet_io.py`: escritura parquet.
+## Responsabilidad de Módulos
 
-## Requisitos
+- `main.py`: Orquestación del pipeline, logging, impresión de reporte resumen y regeneración del DW.
+- `modules/master_catalog.py`: Realiza copia temporal de seguridad de la Lista Maestra de Productos para evitar bloqueos por uso en Google Drive y carga los datos de SKUs.
+- `modules/data_quality/rules_input.py`: Reglas de calidad sobre el Excel crudo, extracción de fecha corte con desfases, y chequeo de negativos.
+- `modules/data_quality/runner.py`: Validación permisiva de SKUs y advertencias en logs.
+- `modules/transform.py`: Mapea los SKUs a la Lista Maestra y realiza el saneamiento de nulos.
+- `modules/load.py`: Exportación de Excels limpios (formateo centrado y eliminación de columnas técnicas) y auditorías.
 
-- Python 3.10+
-- Windows
-- Dependencias de `requirements.txt`
+---
 
-Instalacion:
+## Ejecución (Terminal Bash / Git Bash)
 
-```powershell
-python -m venv venv
-.\venv\Scripts\python.exe -m pip install -r requirements.txt
+### Instalar Requisitos:
+```bash
+./venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-## Ejecucion
-
-Proceso normal:
-
-```powershell
-.\venv\Scripts\python.exe main.py
+### Ejecutar Pipeline (Archivos nuevos):
+```bash
+./venv/Scripts/python.exe main.py
 ```
 
-Reprocesar archivos ya registrados:
-
-```powershell
-.\venv\Scripts\python.exe main.py --force
+### Reprocesar Histórico (Modo forzado):
+```bash
+./venv/Scripts/python.exe main.py --force
 ```
 
-Pruebas automatizadas:
-
-```powershell
-.\venv\Scripts\python.exe -m unittest discover -s tests -v
+### Ejecutar Suite de Pruebas Unitarias:
+```bash
+./venv/Scripts/python.exe -m unittest discover -s tests
 ```
 
-Flujo diario:
+---
 
-1. Descargar el Excel desde Flexy.
-2. Guardarlo en `Reporte/ORIGINAL/`.
-3. Ejecutar `main.py`.
-4. Revisar `PROCESADOS/Excel/` y `LOGS/etl.log`.
-5. Refrescar Power BI.
+## Integración con Power BI
 
-## Pipeline ETL
+El archivo de Power BI (`Reporte Flexy v4 - ETL Python.pbix`) apunta al directorio `DW/` para consumir los archivos Parquet optimizados.
 
-1. Leer el Excel original.
-2. Validar columnas esperadas.
-3. Extraer `fecha_corte` desde `Fecha Actualizacion`.
-4. Validar que no existan valores negativos.
-5. Transformar el layout del Excel.
-6. Guardar Excel limpio para revision humana.
-7. Resolver ocupacion por ubicacion fisica.
-8. Construir `fact_inventario` a nivel de pallet logico.
-9. Guardar auditoria diaria de consolidaciones, descartes y errores.
-10. Validar integridad de ubicaciones antes de cargar.
-11. Escribir la particion diaria parquet.
-12. Sanear particiones historicas si tienen ubicaciones invalidas.
-13. Regenerar dimensiones y tablas auxiliares del historico.
-14. Registrar el resultado en `control_procesados.csv`.
-
-## Transformaciones principales
-
-Entradas esperadas del Excel:
-
-```text
-Fecha Actualizacion, Empresa, Almacen, Ubicacion, Codigo,
-Cantidad, Presentacion, Lote, Fecha Caducidad, Fecha Fabricacion, Producto
+### Medida de Fecha del Título
+El título de Power BI debe consumir directamente el campo sin restarle días manualmente, ya que el ETL en Python se encarga de aplicar la fecha operativa real:
+```DAX
+Fecha Inventario = 
+"Inventario al " &
+FORMAT(MAX(dim_fecha[fecha]), "[$-es-PE]dd ""de"" mmmm, yyyy")
 ```
-
-Transformaciones relevantes:
-
-- `Ubicacion` se divide en `CAMARA`, `RACK`, `NIVEL`, `POSICION`.
-- `CAMARA` se normaliza con una unica logica compartida.
-- `Almacen` se clasifica en `CHAVIN`, `ACUAPESCA`, `EMERGENT COLD` u original.
-- `Estado Producto` se deriva desde el almacen original.
-- `Producto`, `Clasificacion`, `Variedad` y `Calidad` se derivan desde el texto del producto.
-- `Toneladas` = `Cantidad * Presentacion / 1000`.
-- Se eliminan filas con `Codigo` nulo.
-- El layout final queda en mayusculas.
-
-Columnas finales del layout transformado:
-
-```text
-FECHA CORTE, CLIENTE, ALMACEN, ESTADO PRODUCTO, CAMARA, RACK, NIVEL,
-POSICION, CODIGO, CANTIDAD CAJAS, TONELADAS, LOTE, FECHA FABRICACION,
-FECHA CADUCIDAD, PRODUCTO, VARIEDAD, CLASIFICACION, CALIDAD,
-TIPO DE CORTE, PRESENTACION
-```
-
-## Fact table: `fact_inventario/`
-
-Cada particion representa un snapshot limpio del inventario para una fecha.
-El grano ya no es la fila del Excel sino el `pallet_logico` resuelto.
-
-Campos tecnicos principales:
-
-- `fecha_key`: `YYYYMMDD`
-- `cliente_key`
-- `producto_key`
-- `ubicacion_key`
-- `ubicacion_inventario`
-- `almacen_grupo`
-- `tipo_almacen`
-- `tipo_ubicacion`
-- `pallets`
-- `pallet_logico_id`
-- `tipo_registro_resuelto`
-- `ubicacion_ocupada_flag`
-- `conflicto_flag`
-- `sobrecapacidad_flag`
-- `registro_vigente_flag`
-- `pallet_consolidado_flag`
-- `source_file`
-- `source_row_num`
-- `source_row_nums`
-- `snapshot_row_id`
-
-## Historico y tablas auxiliares
-
-El ETL mantiene tres capas utiles para Power BI:
-
-- `DW/fact_inventario/fecha_corte=YYYY-MM-DD/data.parquet`
-  Snapshot historico por fecha.
-- `DW/fact_inventario_actual.parquet`
-  Solo el ultimo snapshot disponible.
-- `DW/fact_snapshot_control.parquet`
-  Resumen por fecha con metricas y validaciones del historico.
-
-`fact_snapshot_control.parquet` incluye, entre otros:
-
-- `fecha_corte`
-- `fact_rows`
-- `pallets_logicos`
-- `ubicaciones_ocupadas`
-- `toneladas_total`
-- `audit_rows`
-- `partition_integrity_ok`
-- `es_ultimo_snapshot_flag`
-
-## Auditoria de ocupacion
-
-El ETL ahora genera tambien:
-
-- `DW/fact_inventario_auditoria/fecha_corte=YYYY-MM-DD/data.parquet`
-- `PROCESADOS/Auditoria/auditoria_ocupacion_DD-MM-YYYY.xlsx`
-
-La auditoria conserva la trazabilidad por fila fuente y clasifica:
-
-- consolidados
-- multipallet valido
-- conflicto resuelto por registro mas reciente
-- descartado por conflicto
-- error de sobrecapacidad
-
-## Reglas configurables
-
-La resolucion de ocupacion ahora depende de tres configuraciones en `config.py`:
-
-- `PALLET_IDENTITY_FIELDS`: define con que campos se consolida un pallet logico.
-- `BOX_CAPACITY_RULES`: define capacidad maxima de cajas por producto o SKU.
-- `MULTIPALLET_COMPATIBILITY_RULES`: define cuando dos pallets pequenos pueden coexistir validamente en una sola ubicacion.
-
-Si existen estos archivos, el ETL los lee automaticamente y reemplaza los defaults de `config.py`:
-
-- `catalogos/box_capacity_rules.csv`
-- `catalogos/multipallet_compatibility_rules.csv`
-
-## Dimension de ubicacion
-
-La relacion principal en Power BI es:
-
-```text
-dim_ubicacion[ubicacion_key] -> fact_inventario[ubicacion_key]
-```
-
-Formato oficial de la clave:
-
-```text
-CAM##-R###-N##-P##
-```
-
-Ejemplo:
-
-```text
-CAM01-R016-N03-P04
-```
-
-`dim_ubicacion` se genera desde `CAPACITY_CONFIG` en `modules/dimensiones.py`.
-
-## Capacidad estructural actual
-
-| Camara | Racks | Niveles | Posiciones | Total |
-|---|---:|---:|---:|---:|
-| CAMARA 01 | 10 | 5 | 14 | 700 |
-| CAMARA 02 | 20 | 3 | 4 | 240 |
-| CAMARA 03 | 20 | 3 | 4 | 240 |
-| CAMARA 04 | 13 | 11 | 3 | 429 |
-| Total |  |  |  | 1609 |
-
-Nota:
-
-- `CAMARA 04` existe en la dimension estructural.
-- `es_operativa` permite distinguir capacidad estructural de capacidad operativa.
-
-## Regla de clasificacion de ubicacion
-
-Un pallet puede quedar como:
-
-- `POSICION`
-- `RECEPCION`
-- `EXTERNO`
-- `SIN_UBICACION`
-
-La regla actual es:
-
-- `EXTERNO` si el almacen no es `CHAVIN`
-- `RECEPCION` si la camara es `RECEPCION`
-- `POSICION` solo si la `ubicacion_key` existe en `dim_ubicacion`
-- `SIN_UBICACION` en cualquier otro caso
-
-## Mejora clave: integridad entre fact y dim_ubicacion
-
-Se reforzo la logica de ubicaciones para evitar el problema clasico de Power BI con la categoria `(En blanco)` por claves huerfanas.
-
-Ahora el ETL hace lo siguiente:
-
-- fact y dimension usan exactamente el mismo constructor de `ubicacion_key`
-- la camara se normaliza de forma consistente
-- se validan ceros a la izquierda, prefijos y conversion numerica
-- una fila no queda como `POSICION` si su clave no existe en `dim_ubicacion`
-- las claves invalidas se reclasifican a `SIN_UBICACION`
-- `ubicacion_key` queda nula cuando no existe match estructural
-- se auditan las diferencias entre claves del fact y la dimension
-- tambien se sanean particiones historicas ya guardadas
-
-## Validaciones automaticas de ubicacion
-
-Antes y durante la carga, el pipeline:
-
-- cuenta pallets con ubicacion candidata sin match en `dim_ubicacion`
-- lista las claves invalidas del fact
-- muestra detalle de filas afectadas en log
-- reescribe particiones historicas si traen ubicaciones inconsistentes
-
-Mensajes esperados en log:
-
-- `OK | sin pallets POSICION fuera de dim_ubicacion`
-- o un warning con detalle de claves reclasificadas a `SIN_UBICACION`
-
-## Dimensiones generadas
-
-| Archivo | Contenido |
-|---|---|
-| `dim_cliente.parquet` | Clientes unicos |
-| `dim_producto.parquet` | Codigo, producto, variedad, clasificacion, calidad, tipo_corte, presentacion, max_cajas_configuradas, regla_capacidad |
-| `dim_fecha.parquet` | Calendario continuo entre la fecha minima y maxima del historico, con flags de snapshot |
-| `dim_ubicacion.parquet` | Posiciones estructurales configuradas |
-
-## Integracion con Power BI
-
-Power BI debe conectarse a:
-
-```text
-DW/
-|-- fact_inventario/
-|-- fact_inventario_actual.parquet
-|-- fact_snapshot_control.parquet
-|-- dim_cliente.parquet
-|-- dim_producto.parquet
-|-- dim_fecha.parquet
-`-- dim_ubicacion.parquet
-```
-
-Analisis habilitados:
-
-- pallets logicos por camara
-- ubicaciones ocupadas usando `sum(ubicacion_ocupada_flag)`
-- pallets consolidados usando `sum(pallet_consolidado_flag)`
-- ubicaciones con conflicto usando `distinctcount(ubicacion_key)` filtrando `conflicto_flag = 1`
-- capacidad vs ocupacion
-- historico por fecha de corte
-- ultimo snapshot sin necesidad de medida especial
-- control del historico para validar que cada fecha sea un snapshot limpio
-- inventario por producto, cliente o almacen
-
-## Validaciones generales
-
-El ETL tambien valida:
-
-- columnas esperadas
-- fechas validas
-- valores negativos en campos numericos
-
-Si encuentra negativos:
-
-- el archivo no se procesa
-- se registra `ERROR_NEGATIVOS`
-- se deja trazabilidad en control y log
-
-## Archivo de control
-
-`PROCESADOS/control_procesados.csv` registra:
-
-- archivo original
-- fecha del archivo
-- fecha de procesamiento
-- estado
-- archivo de salida
-- observacion
-
-Estados habituales:
-
-- `PROCESADO`
-- `ERROR`
-- `ERROR_NEGATIVOS`
-
-## Solucion de problemas
-
-- `ModuleNotFoundError: pyarrow`: instalar dependencias.
-- Archivo bloqueado al escribir Excel: cerrar el archivo abierto.
-- No se detecta fecha: revisar `Fecha Actualizacion`.
-- Archivo bloqueado por negativos: corregir el Excel original.
-- `[SKIP] Ya procesado`: usar `--force` si deseas reprocesar.
-- Visual `(En blanco)` en Power BI: ejecutar el ETL actualizado para sanear particiones historicas y refrescar el modelo.
-
-## Resultado esperado
-
-Con la version actual:
-
-- no debe existir ningun pallet en `POSICION` sin match en `dim_ubicacion`
-- debe desaparecer `(En blanco)` por mismatch de `ubicacion_key`
-- el conteo de pallets por camara debe cuadrar con las posiciones estructurales validas

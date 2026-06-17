@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Caching and virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Local data directories (Data Warehouse and Excel outputs with company information)
+DW/
+PROCESADOS/
+catalogos/box_capacity_rules.csv
+catalogos/multipallet_compatibility_rules.csv
+
+# Logs and temporary files
+*.log
+logs/
+tests_tmp_*/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS and IDE configuration files
+.vscode/
+.idea/
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+~$*.xlsx

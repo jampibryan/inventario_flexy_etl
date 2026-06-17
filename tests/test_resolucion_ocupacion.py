@@ -156,6 +156,60 @@ class ResolucionOcupacionTests(unittest.TestCase):
         self.assertIn("max_cajas_configuradas", dim_producto.columns)
         self.assertIn("regla_capacidad", dim_producto.columns)
 
+    def test_dim_producto_conserva_un_solo_registro_por_codigo(self) -> None:
+        fact_df = pd.DataFrame(
+            [
+                _base_row(
+                    **{
+                        "FECHA CORTE": "2026-04-16",
+                        "CÓDIGO": "PT-PAL-019",
+                        "PRODUCTO": "PALTA",
+                        "PRESENTACIÓN": "IQF DICES 15X15 MM 20 BLS X 500GR CJ X 10KG",
+                        "CLASIFICACIÓN": "CONVENCIONAL",
+                        "CANTIDAD CAJAS": 318,
+                    }
+                ),
+                _base_row(
+                    **{
+                        "FECHA CORTE": "2026-04-28",
+                        "CÓDIGO": "PT-PAL-019",
+                        "PRODUCTO": "PALTA",
+                        "PRESENTACIÓN": "IQF DICES 15X15 MM 20 BLS X 500GR CJ X 10KG",
+                        "CLASIFICACIÓN": "CONVENCIONAL",
+                        "CANTIDAD CAJAS": 90,
+                    }
+                ),
+                _base_row(
+                    **{
+                        "FECHA CORTE": "2026-04-28",
+                        "CÓDIGO": "PT-PAL-019",
+                        "PRODUCTO": "PALTA",
+                        "PRESENTACIÓN": "IQF DICES 15X15 MM 20 BLS X 500GR CJ X 10KG",
+                        "CLASIFICACIÓN": "CONVENCIONAL",
+                        "CANTIDAD CAJAS": 120,
+                    }
+                ),
+                _base_row(
+                    **{
+                        "FECHA CORTE": "2026-04-28",
+                        "CÓDIGO": "PT-PAL-019",
+                        "PRODUCTO": "PALTA",
+                        "PRESENTACIÓN": "IQF DICES 15X15 MM 6 BLS X1 KG CAJA X6KG",
+                        "CLASIFICACIÓN": "CONVENCIONAL",
+                        "CANTIDAD CAJAS": 339,
+                    }
+                ),
+            ]
+        )
+
+        dim_producto = build_dim_producto(fact_df)
+
+        self.assertEqual(dim_producto["producto_key"].tolist(), ["PT-PAL-019"])
+        self.assertEqual(
+            dim_producto.iloc[0]["presentacion"],
+            "IQF DICES 15X15 MM 20 BLS X 500GR CJ X 10KG",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ from config import (
     FACT_PARTITIONED_DIR,
     LOG_FILE,
     LOGS_DIR,
+    MASTER_CATALOG_FILE,
     MULTIPALLET_COMPATIBILITY_RULES,
     ORIGINAL_DIR,
     PALLET_IDENTITY_FIELDS,
@@ -26,6 +27,12 @@ from config import (
     PROCESADOS_DIR,
     PROCESADOS_EXCEL_DIR,
     SNAPSHOT_CONTROL_FILE,
+)
+from modules.master_catalog import load_master_catalog, get_master_catalog_lookup
+from modules.data_quality.runner import (
+    run_file_metadata_checks,
+    run_input_quality_checks,
+    run_transformed_quality_checks,
 )
 from modules.control import (
     add_control_record,
@@ -44,12 +51,8 @@ from modules.dimensiones import (
     summarize_dim_ubicacion_operativa,
 )
 from modules.extract import (
-    extract_date_from_data,
     read_excel_file,
     summarize_operational_resolution_candidates,
-    validate_expected_columns,
-    validate_location_structure,
-    validate_no_negatives,
 )
 from modules.file_manager import get_original_excel_files
 from modules.historico import (
@@ -272,8 +275,8 @@ def build_output_targets(file_date: str) -> OutputTargets:
         excel_name=excel_name,
         excel_output_path=PROCESADOS_EXCEL_DIR / excel_name,
         audit_workbook_path=PROCESADOS_AUDITORIA_DIR / excel_name.replace(
-            "inventario_",
-            "auditoria_ocupacion_",
+            "_inventario.xlsx",
+            "_auditoria_ocupacion.xlsx",
         ),
     )
 
@@ -385,6 +388,11 @@ def main() -> None:
         logger.info("Modo --force activado: se reprocesaran archivos ya procesados.")
 
     logger.info("=== INICIO ETL INVENTARIO FLEXY ===")
+    logger.info("Cargando Lista Maestra de Productos desde: %s", MASTER_CATALOG_FILE)
+    df_catalog = load_master_catalog(MASTER_CATALOG_FILE)
+    catalog_lookup = get_master_catalog_lookup(df_catalog)
+    logger.info("Lista Maestra cargada. SKUs catalogados: %s", len(catalog_lookup))
+
     logger.info(
         "[CONFIG_OCUPACION] identidad_pallet=%s | reglas_capacidad=%s | reglas_multipallet=%s",
         ",".join(PALLET_IDENTITY_FIELDS),
@@ -415,6 +423,7 @@ def main() -> None:
 
     processed_count = 0
     error_count = 0
+    run_summary_records = []
 
     for file_path in original_files:
         filename = file_path.name
@@ -428,14 +437,34 @@ def main() -> None:
 
         try:
             df_raw = read_excel_file(file_path)
+            metadata_quality = run_file_metadata_checks(df_raw, filename)
+            file_date = metadata_quality.file_date
 
-            valid_cols, cols_message = validate_expected_columns(df_raw)
-            if not valid_cols:
-                raise ValueError(cols_message)
-
-            date_ok, file_date, date_error = extract_date_from_data(df_raw)
-            if not date_ok:
-                raise ValueError(date_error)
+            if not metadata_quality.ok:
+                blocked_issue = metadata_quality.blocking_issue
+                if blocked_issue is None:
+                    raise ValueError("Se esperaba una incidencia bloqueante de calidad de datos.")
+                control_df = handle_blocked_file(
+                    logger=logger,
+                    control_df=control_df,
+                    dim_ubicacion=dim_ubicacion,
+                    filename=filename,
+                    file_date=file_date,
+                    estado=blocked_issue.status_code,
+                    observacion=blocked_issue.message,
+                    warning_message=blocked_issue.message,
+                )
+                run_summary_records.append({
+                    "archivo": filename,
+                    "fecha_corte": file_date if file_date else "DESCONOCIDA",
+                    "estado": blocked_issue.status_code,
+                    "pallets": 0,
+                    "consolidaciones": 0,
+                    "skus_no_catalogados": 0,
+                    "observacion": blocked_issue.message
+                })
+                error_count += 1
+                continue
 
             output_targets = build_output_targets(file_date)
 
@@ -448,48 +477,54 @@ def main() -> None:
                     output_targets=output_targets,
                 )
 
-            valid_nums, nums_message, df_validated = validate_no_negatives(df_raw, filename)
-            if nums_message:
-                logger.info(nums_message)
-            if not valid_nums:
-                control_df = handle_blocked_file(
-                    logger=logger,
-                    control_df=control_df,
-                    dim_ubicacion=dim_ubicacion,
-                    filename=filename,
-                    file_date=file_date,
-                    estado="ERROR_NEGATIVOS",
-                    observacion="Valores negativos detectados. Corregir Excel original.",
-                    warning_message=f"[BLOQUEADO] {filename}: corrige el Excel original.",
-                )
-                error_count += 1
-                continue
+            input_quality = run_input_quality_checks(df_raw, filename)
+            for warning_message in input_quality.warning_messages:
+                logger.info(warning_message)
+
+            df_validated = input_quality.dataframe
+            if df_validated is None:
+                raise ValueError("La etapa de calidad de entrada no devolvio un DataFrame valido.")
 
             operational_message = summarize_operational_resolution_candidates(df_validated, filename)
             if operational_message:
                 logger.info(operational_message)
 
-            location_ok, location_message = validate_location_structure(df_validated, filename)
-            if location_message:
-                logger.info(location_message)
-            if not location_ok:
+            df_clean = transform_inventory(df_validated, file_date, catalog_lookup=catalog_lookup)
+            fact_hist_before_file = build_fact_from_partitions(FACT_PARTITIONED_DIR)
+            transformed_quality = run_transformed_quality_checks(
+                df_clean,
+                filename,
+                historical_df=fact_hist_before_file,
+                catalog_lookup=catalog_lookup,
+            )
+            for warning_message in transformed_quality.warning_messages:
+                logger.info(warning_message)
+            if not transformed_quality.ok:
+                blocked_issue = transformed_quality.blocking_issue
+                if blocked_issue is None:
+                    raise ValueError("Se esperaba una incidencia bloqueante de calidad de datos transformados.")
                 control_df = handle_blocked_file(
                     logger=logger,
                     control_df=control_df,
                     dim_ubicacion=dim_ubicacion,
                     filename=filename,
                     file_date=file_date,
-                    estado="ERROR_UBICACION",
-                    observacion="Ubicaciones fuera de estructura CAPACITY_CONFIG. Corregir Excel original.",
-                    warning_message=(
-                        f"[BLOQUEADO] {filename}: el ETL no continua a transformacion ni a resolucion de ocupacion "
-                        "porque primero debe respetarse la estructura fisica de ubicaciones del Excel."
-                    ),
+                    estado=blocked_issue.status_code,
+                    observacion=blocked_issue.message,
+                    warning_message=blocked_issue.message,
                 )
+                run_summary_records.append({
+                    "archivo": filename,
+                    "fecha_corte": file_date,
+                    "estado": blocked_issue.status_code,
+                    "pallets": 0,
+                    "consolidaciones": 0,
+                    "skus_no_catalogados": 0,
+                    "observacion": blocked_issue.message
+                })
                 error_count += 1
                 continue
 
-            df_clean = transform_inventory(df_validated, file_date)
             save_daily_outputs(df_clean, output_targets.excel_output_path)
 
             fact_resolved, audit_daily, resolution_summary = resolve_location_occupancy(
@@ -543,6 +578,19 @@ def main() -> None:
             processed_count += 1
             logger.info(f"[OK] {filename}")
 
+            unique_skus = set(df_clean["CÓDIGO"].dropna().astype(str).str.strip().str.upper().unique())
+            missing_skus = [sku for sku in unique_skus if sku != "SIN_SKU" and sku not in catalog_lookup]
+
+            run_summary_records.append({
+                "archivo": filename,
+                "fecha_corte": file_date,
+                "estado": "PROCESADO",
+                "pallets": int(resolution_summary.get('logical_pallets', 0)),
+                "consolidaciones": int(resolution_summary.get('consolidated_pallets', 0)),
+                "skus_no_catalogados": len(missing_skus),
+                "observacion": "OK" if len(missing_skus) == 0 else f"Advertencia: {len(missing_skus)} SKU(s) no catalogados"
+            })
+
         except Exception as e:
             control_df = register_control_status(
                 control_df,
@@ -551,12 +599,42 @@ def main() -> None:
                 estado="ERROR",
                 observacion=str(e),
             )
+            run_summary_records.append({
+                "archivo": filename,
+                "fecha_corte": file_date if file_date else "DESCONOCIDA",
+                "estado": "ERROR",
+                "pallets": 0,
+                "consolidaciones": 0,
+                "skus_no_catalogados": 0,
+                "observacion": str(e)
+            })
             error_count += 1
             logger.exception(f"[ERROR] {filename}: {e}")
             refresh_dimensions_from_partitions(logger, dim_ubicacion)
 
     save_control_file(control_df, CONTROL_FILE)
     refresh_dimensions_from_partitions(logger, dim_ubicacion, log_dim_ubicacion=True)
+
+    if run_summary_records:
+        logger.info("=" * 110)
+        logger.info(" REPORTE RESUMEN DE PROCESAMIENTO (PIPELINE RUN SUMMARY)")
+        logger.info("=" * 110)
+        logger.info(
+            f"{'ARCHIVO':<35} | {'FECHA CORTE':<12} | {'ESTADO':<15} | {'PALLETS':<8} | {'CONSOLID.':<9} | {'SKUs MISSING':<12}"
+        )
+        logger.info("-" * 110)
+        for rec in run_summary_records:
+            logger.info(
+                f"{rec['archivo'][:35]:<35} | "
+                f"{rec['fecha_corte']:<12} | "
+                f"{rec['estado']:<15} | "
+                f"{rec['pallets']:<8} | "
+                f"{rec['consolidaciones']:<9} | "
+                f"{rec['skus_no_catalogados']:<12}"
+            )
+            if rec['skus_no_catalogados'] > 0 or rec['estado'] != "PROCESADO":
+                logger.info(f"   --> Observación: {rec['observacion']}")
+        logger.info("=" * 110)
 
     logger.info("=== FIN ETL INVENTARIO FLEXY ===")
     logger.info(f"Procesados nuevos: {processed_count}")

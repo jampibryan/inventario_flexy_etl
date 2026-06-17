@@ -187,7 +187,27 @@ def build_dim_producto(fact_df: pd.DataFrame) -> pd.DataFrame:
         )
 
     fact_df = _canonicalize_product_fact_columns(fact_df.copy())
-    df = fact_df[["C\u00d3DIGO", "PRODUCTO", "PRESENTACI\u00d3N", "CLASIFICACI\u00d3N"]].drop_duplicates().copy()
+    ranking_df = fact_df.copy()
+    ranking_df["producto_key"] = ranking_df["C\u00d3DIGO"].astype(str).str.strip().str.upper()
+    ranking_df["fecha_corte_rank"] = pd.to_datetime(ranking_df.get("FECHA CORTE"), errors="coerce")
+    ranking_df["cantidad_cajas_rank"] = pd.to_numeric(
+        ranking_df.get("CANTIDAD CAJAS"), errors="coerce"
+    ).fillna(0)
+
+    product_rank = (
+        ranking_df.groupby(
+            ["producto_key", "C\u00d3DIGO", "PRODUCTO", "PRESENTACI\u00d3N", "CLASIFICACI\u00d3N"],
+            dropna=False,
+        )
+        .agg(
+            fecha_corte_rank=("fecha_corte_rank", "max"),
+            apariciones=("producto_key", "size"),
+            cantidad_cajas_rank=("cantidad_cajas_rank", "sum"),
+        )
+        .reset_index()
+    )
+
+    df = product_rank[["C\u00d3DIGO", "PRODUCTO", "PRESENTACI\u00d3N", "CLASIFICACI\u00d3N"]].copy()
     df["producto"] = df["PRODUCTO"]
     df["variedad"] = [
         obtener_variedad(producto, presentacion)
@@ -216,9 +236,55 @@ def build_dim_producto(fact_df: pd.DataFrame) -> pd.DataFrame:
             "presentacion",
             "max_cajas_configuradas",
             "regla_capacidad",
+            "PRODUCTO",
+            "PRESENTACI\u00d3N",
+            "CLASIFICACI\u00d3N",
         ]
     ].copy()
     df_final["tipo_corte"] = df_final["tipo_corte"].astype("string")
+    df_final = df_final.merge(
+        product_rank[
+            [
+                "producto_key",
+                "PRODUCTO",
+                "PRESENTACI\u00d3N",
+                "CLASIFICACI\u00d3N",
+                "fecha_corte_rank",
+                "apariciones",
+                "cantidad_cajas_rank",
+            ]
+        ],
+        on=["producto_key", "PRODUCTO", "PRESENTACI\u00d3N", "CLASIFICACI\u00d3N"],
+        how="left",
+    )
+    df_final = df_final.sort_values(
+        [
+            "producto_key",
+            "fecha_corte_rank",
+            "apariciones",
+            "cantidad_cajas_rank",
+            "presentacion",
+            "producto",
+            "clasificacion",
+        ],
+        ascending=[True, False, False, False, True, True, True],
+        na_position="last",
+    )
+    df_final = df_final.drop_duplicates(subset=["producto_key"], keep="first")
+    df_final = df_final[
+        [
+            "producto_key",
+            "codigo",
+            "producto",
+            "variedad",
+            "clasificacion",
+            "calidad",
+            "tipo_corte",
+            "presentacion",
+            "max_cajas_configuradas",
+            "regla_capacidad",
+        ]
+    ]
     return df_final.reset_index(drop=True)
 
 

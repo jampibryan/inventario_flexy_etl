@@ -14,4 +14,4 @@ def format_date_ddmmyyyy(date_str: str) -> str:
 
 def build_output_names(date_str: str) -> str:
     visible_date = format_date_ddmmyyyy(date_str)
-    return f"inventario_{visible_date}.xlsx"
+    return f"{visible_date}_inventario.xlsx"

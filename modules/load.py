@@ -1,4 +1,4 @@
-﻿import shutil
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -203,15 +203,34 @@ def _build_audit_readme_sheet() -> pd.DataFrame:
     )
 
 
-def _autosize_worksheet(worksheet, df: pd.DataFrame, max_width: int = 40) -> None:
+def _format_dates_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
+    df_copy = df.copy()
+    for col in df_copy.columns:
+        if pd.api.types.is_datetime64_any_dtype(df_copy[col]):
+            df_copy[col] = df_copy[col].dt.strftime("%Y-%m-%d")
+        else:
+            df_copy[col] = df_copy[col].apply(
+                lambda x: x.strftime("%Y-%m-%d") if (hasattr(x, "strftime") and not pd.isna(x)) else x
+            )
+    return df_copy
+
+
+def _autosize_worksheet(worksheet, df: pd.DataFrame, max_width: int = 40, workbook=None) -> None:
     if df.empty:
         return
+
+    center_format = None
+    if workbook is not None:
+        center_format = workbook.add_format({"align": "center"})
 
     for col_idx, column in enumerate(df.columns):
         sample_values = df[column].head(100).tolist()
         sample_lengths = [len("" if pd.isna(value) else str(value)) for value in sample_values]
         width = max(len(str(column)), max(sample_lengths, default=0)) + 2
-        worksheet.set_column(col_idx, col_idx, min(width, max_width))
+        worksheet.set_column(col_idx, col_idx, min(width, max_width), center_format)
 
     worksheet.freeze_panes(1, 0)
 
@@ -221,7 +240,14 @@ def save_daily_outputs(df: pd.DataFrame, excel_path: Path) -> None:
     Guarda Excel transformado para revisión humana.
     """
     excel_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_excel(excel_path, index=False, engine="xlsxwriter")
+    df_excel = df.copy()
+    if "_SOURCE_ROW_NUM" in df_excel.columns:
+        df_excel.drop(columns=["_SOURCE_ROW_NUM"], inplace=True)
+
+    df_excel = _format_dates_for_excel(df_excel)
+    with pd.ExcelWriter(excel_path, engine="xlsxwriter") as writer:
+        df_excel.to_excel(writer, sheet_name="Sheet1", index=False)
+        _autosize_worksheet(writer.sheets["Sheet1"], df_excel, max_width=28, workbook=writer.book)
 
 
 def save_resolution_audit_workbook(
@@ -240,6 +266,13 @@ def save_resolution_audit_workbook(
     summary_sheet = _build_audit_summary_sheet(audit_business)
     location_cases_sheet = _build_location_cases_sheet(location_cases_df)
 
+    fact_business = _format_dates_for_excel(fact_business)
+    audit_business = _format_dates_for_excel(audit_business)
+    if not summary_sheet.empty:
+        summary_sheet = _format_dates_for_excel(summary_sheet)
+    if not location_cases_sheet.empty:
+        location_cases_sheet = _format_dates_for_excel(location_cases_sheet)
+
     with pd.ExcelWriter(workbook_path, engine="xlsxwriter") as writer:
         readme_sheet.to_excel(writer, sheet_name="leeme", index=False)
         if not summary_sheet.empty:
@@ -251,11 +284,11 @@ def save_resolution_audit_workbook(
 
         _autosize_worksheet(writer.sheets["leeme"], readme_sheet, max_width=45)
         if not summary_sheet.empty:
-            _autosize_worksheet(writer.sheets["resumen"], summary_sheet, max_width=45)
-        _autosize_worksheet(writer.sheets["inventario_final"], fact_business, max_width=28)
-        _autosize_worksheet(writer.sheets["detalle_auditoria"], audit_business, max_width=28)
+            _autosize_worksheet(writer.sheets["resumen"], summary_sheet, max_width=45, workbook=writer.book)
+        _autosize_worksheet(writer.sheets["inventario_final"], fact_business, max_width=28, workbook=writer.book)
+        _autosize_worksheet(writer.sheets["detalle_auditoria"], audit_business, max_width=28, workbook=writer.book)
         if not location_cases_sheet.empty:
-            _autosize_worksheet(writer.sheets["casos_ubicacion"], location_cases_sheet, max_width=45)
+            _autosize_worksheet(writer.sheets["casos_ubicacion"], location_cases_sheet, max_width=45, workbook=writer.book)
 
 
 def get_partition_path(base_dir: Path, fecha_corte: str) -> Path:

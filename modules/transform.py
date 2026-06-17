@@ -65,7 +65,7 @@ def _build_output_columns(df: pd.DataFrame) -> list[str]:
     return output_columns
 
 
-def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
+def transform_inventory(df: pd.DataFrame, file_date: str, catalog_lookup: dict | None = None) -> pd.DataFrame:
     df = df.copy()
 
     df["Fecha Actualizaci\u00f3n"] = parse_datetime_series(df["Fecha Actualizaci\u00f3n"])
@@ -75,22 +75,35 @@ def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
     _normalize_text_columns(df)
     _normalize_numeric_columns(df)
 
-    df["C\u00f3digo"] = df["C\u00f3digo"].replace({"nan": None, "None": None, "": None})
-    df = df[df["C\u00f3digo"].notna()].copy()
+    # En lugar de eliminar filas con Código nulo, las rellenamos con 'SIN_SKU'
+    df["C\u00f3digo"] = df["C\u00f3digo"].astype(str).str.strip().str.upper()
+    df["C\u00f3digo"] = df["C\u00f3digo"].replace({"NAN": "SIN_SKU", "NONE": "SIN_SKU", "": "SIN_SKU", "<NA>": "SIN_SKU", "NAT": "SIN_SKU"})
+    df["C\u00f3digo"] = df["C\u00f3digo"].fillna("SIN_SKU")
 
     df["Almac\u00e9n Original"] = df["Almac\u00e9n"].astype(str).str.strip()
     df["Ubicaci\u00f3n Original"] = df["Ubicaci\u00f3n"].astype(str).str.strip()
 
     _split_ubicacion(df)
 
-    df["Presentacion Kg"] = [
-        resolver_presentacion_kg(producto, presentacion, cantidad)
-        for producto, presentacion, cantidad in zip(
-            df["Producto"],
-            df["Presentaci\u00f3n"],
-            df["Cantidad"],
-        )
-    ]
+    # Resolver Peso x UM (Presentacion Kg)
+    presentacion_kg_list = []
+    for codigo, producto, presentacion, cantidad in zip(
+        df["C\u00f3digo"],
+        df["Producto"],
+        df["Presentaci\u00f3n"],
+        df["Cantidad"],
+    ):
+        sku = str(codigo).strip().upper()
+        if catalog_lookup and sku in catalog_lookup:
+            peso = catalog_lookup[sku]["peso"]
+            presentacion_kg_list.append(peso)
+        elif sku == "SIN_SKU":
+            presentacion_kg_list.append(1.0)
+        else:
+            peso = resolver_presentacion_kg(producto, presentacion, cantidad)
+            presentacion_kg_list.append(peso if peso is not None else 1.0)
+
+    df["Presentacion Kg"] = presentacion_kg_list
     df["Toneladas"] = ((df["Cantidad"] * df["Presentacion Kg"]) / 1000).round(2)
     df["Fecha Corte"] = pd.to_datetime(file_date, errors="coerce").date()
     df["Cliente"] = df["Empresa"]
@@ -99,17 +112,53 @@ def transform_inventory(df: pd.DataFrame, file_date: str) -> pd.DataFrame:
     df["Almac\u00e9n"] = df["Almac\u00e9n Original"].apply(clasificar_almacen)
     df["Estado Producto"] = df["Almac\u00e9n Original"].apply(clasificar_estado_producto)
 
-    df["Producto Clasificado"] = df["Producto"].apply(clasificar_producto)
-    df["Clasificaci\u00f3n"] = df["Producto"].apply(clasificar_clasificacion)
-    df["Presentaci\u00f3n Limpia"] = [
-        limpiar_presentacion(texto_producto, producto_clasificado)
-        for texto_producto, producto_clasificado in zip(df["Producto"], df["Producto Clasificado"])
-    ]
-    df["Variedad"] = [
-        obtener_variedad(producto, presentacion)
-        for producto, presentacion in zip(df["Producto Clasificado"], df["Presentaci\u00f3n Limpia"])
-    ]
-    df["Calidad"] = df["Producto Clasificado"].apply(obtener_calidad)
+    # Clasificar Producto, Clasificación, Presentación, Variedad y Calidad
+    producto_clasificado_list = []
+    clasificacion_list = []
+    presentacion_limpia_list = []
+    variedad_list = []
+    calidad_list = []
+
+    for codigo, texto_producto in zip(df["C\u00f3digo"], df["Producto"]):
+        sku = str(codigo).strip().upper()
+        if catalog_lookup and sku in catalog_lookup:
+            materia_prima = catalog_lookup[sku]["producto"]
+            desc_corta = catalog_lookup[sku]["descripcion_corta"]
+            
+            p_clasificado = materia_prima
+            clasif = clasificar_clasificacion(texto_producto) # mantiene lógica de orgánico/convencional del texto
+            
+            if desc_corta:
+                pres_limpia = limpiar_presentacion(desc_corta, p_clasificado)
+            else:
+                pres_limpia = limpiar_presentacion(texto_producto, p_clasificado)
+                
+            var = obtener_variedad(p_clasificado, pres_limpia)
+            cal = obtener_calidad(p_clasificado)
+        elif sku == "SIN_SKU":
+            p_clasificado = "PRODUCTO SIN CLASIFICAR"
+            clasif = "SIN CLASIFICAR"
+            pres_limpia = "SIN CLASIFICAR"
+            var = "SIN CLASIFICAR"
+            cal = "SIN CLASIFICAR"
+        else:
+            p_clasificado = clasificar_producto(texto_producto)
+            clasif = clasificar_clasificacion(texto_producto)
+            pres_limpia = limpiar_presentacion(texto_producto, p_clasificado)
+            var = obtener_variedad(p_clasificado, pres_limpia)
+            cal = obtener_calidad(p_clasificado)
+
+        producto_clasificado_list.append(p_clasificado)
+        clasificacion_list.append(clasif)
+        presentacion_limpia_list.append(pres_limpia)
+        variedad_list.append(var)
+        calidad_list.append(cal)
+
+    df["Producto Clasificado"] = producto_clasificado_list
+    df["Clasificaci\u00f3n"] = clasificacion_list
+    df["Presentaci\u00f3n Limpia"] = presentacion_limpia_list
+    df["Variedad"] = variedad_list
+    df["Calidad"] = calidad_list
     df["Tipo de Corte"] = None
 
     df.drop(columns=["Producto", "Presentaci\u00f3n", "Presentacion Kg"], inplace=True)

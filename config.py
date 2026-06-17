@@ -1,4 +1,4 @@
-﻿import csv
+import csv
 import os
 from pathlib import Path
 
@@ -38,6 +38,17 @@ FACT_ACTUAL_FILE = DW_DIR / "fact_inventario_actual.parquet"
 SNAPSHOT_CONTROL_FILE = DW_DIR / "fact_snapshot_control.parquet"
 
 LOG_FILE = LOGS_DIR / "etl.log"
+
+# ==============================
+# Configuración de Catálogo / Fechas
+# ==============================
+MASTER_CATALOG_FILE = Path(
+    r"G:\Unidades compartidas\Departamento de TI\04. Proyectos\14. Repertorio\01. PPTT\05. SKU - Presentaciones\LISTA MAESTRA DE PRODUCTOS.xlsx"
+)
+# Puede ser "filename" (extrae de nombre de archivo) o "content" (de la celda interna)
+DATE_SOURCE = "filename"
+# Desplazamiento en días para la fecha de corte (-1 para que "hoy" sea "ayer")
+DATE_SHIFT_DAYS = -1
 
 # ==============================
 # Columnas esperadas Excel Flexy

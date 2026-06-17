@@ -1,4 +1,4 @@
-﻿import shutil
+import shutil
 import unittest
 from pathlib import Path
 
@@ -18,6 +18,8 @@ class HistoricoTests(unittest.TestCase):
         self.audit_dir.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self) -> None:
+        import gc
+        gc.collect()
         if self.base_dir.exists():
             shutil.rmtree(self.base_dir)
 
